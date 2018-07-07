@@ -1,8 +1,8 @@
-use crossbeam_channel::{
-	Sender,
-	Receiver,
-};
-use std::io;
+// use crossbeam_channel::{
+// 	Sender,
+// 	Receiver,
+// };
+// use std::io;
 use std::net::UdpSocket;
 use super::*;
 
@@ -23,7 +23,9 @@ fn go() {
 	let x_buf = (0..8).collect::<Vec<_>>();
 	let mut ybuf = [0u8; 128];
 
-	x.send(&x_buf, Guarantee::None).unwrap();
+	x.sender_do(Guarantee::None, |mut w| w.write(&x_buf[..]).map(|_| ()));
+
+	// x.send(&x_buf, Guarantee::None).unwrap();
 	let res = y.try_recv();
 	println!("res {:?}", res);
 }

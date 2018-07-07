@@ -2,7 +2,10 @@ extern crate crossbeam_channel;
 extern crate byteorder;
 // use std::io::Cursor;
 
-use std::io::{Write, Read};
+use std::io::{
+	Write,
+	// Read,
+};
 use std::io;
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
@@ -56,20 +59,27 @@ impl Endpoint {
 		}
 	}
 
-	pub fn send(&mut self, msg: &[u8], g: Guarantee) -> Result<(), io::Error> {
-		let mut vec = vec![];
-		self.next_to_send.write_to(&mut vec).unwrap();
-		self.next_to_send = self.next_to_send.new_plus(1);
-		vec.write(msg);
-		self.sock.send_to(&vec[..], self.peer).map(|r| ())
+	pub fn sender_do<'a,F>(&'a mut self, g: Guarantee, mut work: F) -> Result<(),io::Error>
+	where F: FnMut(Writeymabob<'a>)->Result<(),io::Error> + Sized {
+		let sender = self.sender(g);
+		work(sender)
 	}
 
-	pub fn send_set<'a,I>(&mut self, msgs: I) where I: Iterator<Item=&'a [u8]> {
-		unimplemented!()
+	pub fn sender(&mut self, g: Guarantee) -> Writeymabob {
+		Writeymabob {
+			guarantee: g,
+			buf: &mut self.out_buf,
+			sock: &mut self.sock,
+		}
+		// let mut vec = vec![];
+		// self.next_to_send.write_to(&mut vec).unwrap();
+		// self.next_to_send = self.next_to_send.new_plus(1);
+		// vec.write(msg);
+		// self.sock.send_to(&vec[..], self.peer).map(|_r| ())
 	}
 
 	fn read_incoming(&mut self) -> Result<(), io::Error> {
-		
+
 		loop {
 			println!("loop..");
 			match self.sock.recv_from(&mut self.next_msg[0..]) {
@@ -115,7 +125,8 @@ impl Endpoint {
 	}
 }
 
-struct Writeymabob<'a> {
+pub struct Writeymabob<'a> {
+	guarantee: Guarantee,
 	sock: &'a mut UdpSocket,
 	buf: &'a mut Vec<u8>,
 }
