@@ -68,8 +68,7 @@ impl Endpoint {
 	pub fn sender(&mut self, g: Guarantee) -> Writeymabob {
 		Writeymabob {
 			guarantee: g,
-			buf: &mut self.out_buf,
-			sock: &mut self.sock,
+			endpt: self,
 		}
 		// let mut vec = vec![];
 		// self.next_to_send.write_to(&mut vec).unwrap();
@@ -123,12 +122,16 @@ impl Endpoint {
 	pub fn recv(&mut self) -> &[u8] {
 		unimplemented!()
 	}
+
+	fn send_out(&mut self, bytes: u16) -> Result<(), io::Error> {
+		unimplemented!()
+	}
 }
 
 pub struct Writeymabob<'a> {
 	guarantee: Guarantee,
-	sock: &'a mut UdpSocket,
-	buf: &'a mut Vec<u8>,
+	bytes: u16,
+	endpt: &'a mut Endpoint, 
 }
 
 impl<'a> Writeymabob<'a> {
@@ -136,11 +139,15 @@ impl<'a> Writeymabob<'a> {
 }
 impl<'a> io::Write for Writeymabob<'a> {
 	fn write(&mut self, bytes: &[u8]) -> Result<usize, io::Error> {
-		unimplemented!()
+		(&mut self.endpt.out_buf[self.bytes as usize..]).write(bytes)?;
+		self.bytes += bytes.len() as u16;
+		Ok(self.bytes.len())
 	}
 
 	fn flush(&mut self) -> Result<(), io::Error> {
-		unimplemented!()
+		let b = self.bytes;
+		self.bytes = 0;
+		elf.endpt.send_out(b)
 	}
 }
 
