@@ -7,7 +7,6 @@ use std::net::UdpSocket;
 use super::*;
 
 
-
 #[test]
 fn go() {
 	let loopback = "127.0.0.1";
@@ -20,12 +19,17 @@ fn go() {
 
 	let mut x = Endpoint::new(a, a2.parse().unwrap());
 	let mut y = Endpoint::new(b, a1.parse().unwrap());
-	let x_buf = (0..8).collect::<Vec<_>>();
+	let x_buf = vec![21,21,21,21,21];
 	let mut ybuf = [0u8; 128];
 
-	x.sender_do(Guarantee::None, |mut w| w.write(&x_buf[..]).map(|_| ()));
 
-	// x.send(&x_buf, Guarantee::None).unwrap();
-	let res = y.try_recv();
-	println!("res {:?}", res);
+	x.write(&x_buf[..]).expect("write bad");
+	x.send(Guarantee::None).expect("send bad");
+	x.send(Guarantee::None).expect("send bad2");
+
+	println!("\n///////////////////\n");
+	for i in 0..5 {
+
+		println!("\nTRY {}:: res {:?}", i,  y.try_recv());
+	}
 }
