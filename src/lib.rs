@@ -2,6 +2,7 @@ extern crate crossbeam_channel;
 extern crate byteorder;
 // use std::io::Cursor;
 
+use std::time::Instant;
 use std::io::{
 	Write,
 	// Read,
@@ -41,8 +42,10 @@ pub struct Endpoint {
 	last_acked: ModOrd,
 	peer: SocketAddr,
 	out_buf: Vec<u8>,
-	to_be_ackd: HashMap<ModOrd, Vec<u8>>,
+	outbox: HashMap<ModOrd, Vec<u8>>,
 	out_payload_len: usize,
+
+	out_quiet_since: Instant,
 
 	//receiving
 	inbox: HashMap<ModOrd, HashSet<Vec<u8>>>,
@@ -58,7 +61,7 @@ impl Endpoint {
 		Endpoint {
 			sock, peer,
 			inbox: HashMap::new(),
-			to_be_ackd: HashMap::new(),
+			outbox: HashMap::new(),
 			out_buf: iter::repeat(99).take(32).collect(),
 			next_to_yield: ModOrd::ZERO,
 			next_to_send: ModOrd::ZERO,
@@ -66,30 +69,39 @@ impl Endpoint {
 			next_msg: iter::repeat(99).take(32).collect(),
 			to_pop: None,
 			out_payload_len: 0,
+			out_quiet_since: Instant::now(),
 		}
 	}
 
-	pub fn as_set_do<'a,T,F>(&'a mut self, mut work: F) -> T
-	where
-		F: FnMut(SetSender<'a>) -> T,
-		T: Sized,
-	{
-		work(self.as_set())
-	}
+	// pub fn as_set_do<'a,T,F>(&'a mut self, mut work: F) -> T
+	// where
+	// 	F: FnMut(SetSender<'a>) -> T,
+	// 	T: Sized,
+	// {
+	// 	work(self.as_set())
+	// }
 
-	pub fn as_set(&mut self) -> SetSender {
-		SetSender {
-			bytes: 0,
-			endpt: self,
-		}
-	}
+	// pub fn as_set(&mut self) -> SetSender {
+	// 	SetSender {
+	// 		bytes: 0,
+	// 		endpt: self,
+	// 	}
+	// }
 
-	fn may_yeild(&self, seq: ModOrd, seq_min: u16) -> bool {
+	fn may_yeild(&self, seq: ModOrd) -> bool {
 		self.next_to_yield == seq
 		|| seq == ModOrd::SPECIAL
 	}
 
-	pub fn store_into_inbox(&mut self, msg: Vec<u8>, seq: ModOrd, seq_min: u16) {
+	pub fn store_into_inbox(&mut self, msg: Vec<u8>, seq: ModOrd) {
+		//TODO
+	}
+
+	pub fn advance_my_ack(&mut self, seq: ModOrd) {
+
+	}
+
+	pub fn store_into_outbox(&mut self, msg: Vec<u8>, seq: ModOrd) {
 		//TODO
 	}
 
@@ -105,6 +117,8 @@ impl Endpoint {
 					.expect("BAD HEADER??");
 					println!("HEADER: {:?}", h);
 					println!("PAYLOAD: {:?}", &self.next_msg[Header::LEN..len]);
+
+					println!("sender is acking up to... {:?}", h.ack);
 					if self.may_yeild(h.seq, h.seq_minor) {
 						println!("YEILDING MESSAGE");
 						return Ok(Some(&self.next_msg[Header::LEN..len]))
@@ -114,7 +128,6 @@ impl Endpoint {
 						self.store_into_inbox(
 							v,
 							h.seq,
-							h.seq_minor,
 						);
 					}
 				},
@@ -146,18 +159,21 @@ impl Endpoint {
 		};
 		let h = Header {
 			seq,
-			seq_minor: 0,
+			// seq_minor: 0,
 			ack: self.last_acked,
-			ack_minor: 0,
+			// ack_minor: 0,
 			seqs_since_del: 0,
-			seqs_since_del_minor: 0,
+			// seqs_since_del_minor: 0,
 		};
 		h.write_to(&mut self.out_buf[..])?;
 
 		if let Guarantee::Delivery(_) = guarantee {
-			self.to_be_ackd.insert(
-				self.next_to_send,
-				self.out_buf[..(Header::LEN+(bytes as usize))].to_vec(),
+			let v = self.out_buf[..(Header::LEN+(bytes as usize))].to_vec();
+			println!("Storing into outbox...");
+			self.store_into_outbox(
+				v,
+				h.seq,
+				h.seq_minor,
 			);
 		}
 		println!("out buf is {:?}", self.out_buf);
@@ -196,25 +212,25 @@ impl Sender for Endpoint {
 	}
 }
 
-impl<'a> Sender for SetSender<'a> {
-	fn send(&mut self, g: Guarantee) -> io::Result<usize> {
-		let b = self.bytes;
-		self.bytes = 0;
-		self.endpt.send_out(b, g)
-	}
-}
+// impl<'a> Sender for SetSender<'a> {
+// 	fn send(&mut self, g: Guarantee) -> io::Result<usize> {
+// 		let b = self.bytes;
+// 		self.bytes = 0;
+// 		self.endpt.send_out(b, g)
+// 	}
+// }
 
-impl<'a> io::Write for SetSender<'a> {
-	fn write(&mut self, bytes: &[u8]) -> Result<usize, io::Error> {
-		(&mut self.endpt.out_buf[Header::LEN + self.bytes as usize..]).write(bytes)?;
-		self.bytes += bytes.len();
-		Ok(bytes.len())
-	}
+// impl<'a> io::Write for SetSender<'a> {
+// 	fn write(&mut self, bytes: &[u8]) -> Result<usize, io::Error> {
+// 		(&mut self.endpt.out_buf[Header::LEN + self.bytes as usize..]).write(bytes)?;
+// 		self.bytes += bytes.len();
+// 		Ok(bytes.len())
+// 	}
 
-	fn flush(&mut self) -> Result<(), io::Error> {
-		Ok(())
-	}
-}
+// 	fn flush(&mut self) -> Result<(), io::Error> {
+// 		Ok(())
+// 	}
+// }
 
 pub trait Sender: io::Write {
 	fn send(&mut self, g: Guarantee) -> io::Result<usize>;

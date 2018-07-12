@@ -24,7 +24,7 @@ fn go() {
 
 
 	x.write(&x_buf[..]).expect("write bad");
-	x.send(Guarantee::None).expect("send bad");
+	x.send(Guarantee::Delivery(0)).expect("send bad");
 	x.send(Guarantee::None).expect("send bad2");
 
 	println!("\n///////////////////\n");
