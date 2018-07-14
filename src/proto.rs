@@ -71,6 +71,7 @@ struct Endpoint {
 	n: usize,
 	largest_set_id_yielded: usize,
 	inbox: Inbox,
+	seen_before: HashSet<ModOrd>,
 }
 
 impl Endpoint {
@@ -87,6 +88,7 @@ impl Endpoint {
 			n: 0,
 			largest_set_id_yielded: 0,
 			inbox: Inbox::new(),
+			seen_before: HashSet::new(),
 		}
 	}
 
@@ -95,48 +97,51 @@ impl Endpoint {
 		t.send(guarantee, payload);
 	}
 
+	fn pre_yield(&mut self, msg: &Message) {
+		if msg.h.set_id > self.largest_set_id_yielded {
+			self.largest_set_id_yielded = msg.h.set_id;
+			self.seen_before.clear();
+		}
+		self.seen_before.insert(msg.h.id);
+		if self.n < msg.h.set_id {
+			self.n = msg.h.set_id;
+			println!("n set to set_id={}", self.n);
+		}
+		if msg.h.del {
+			self.n += 1;
+			println!("incrementing n because del. now is {}", self.n);
+		}
+	}
+
 	pub fn recv(&mut self) -> Option<String> {
 		// first try inbox
 		if let Some(msg) = self.inbox.try_fetch(self.n) {
-			let (header, payload) = (msg.h, msg.payload);
-			self.largest_set_id_yielded = header.set_id;
-			println!("can recv from STORE :)");
-			if self.n < header.set_id {
-				self.n = header.set_id;
-				println!("n set to set_id={}", self.n);
-			}
-			if header.del {
-				self.n += 1;
-				println!("incrementing n because del. now is {}", self.n);
-			}
-			return Some(payload);
+			self.pre_yield(&msg);
+			println!("yeilding from store...");
+			return Some(msg.payload);
 		}
 
 		// otherwise try recv
 		while let Some(msg) = self.channel.recv() {
+			println!("recv loop..");
 			println!("\n::: channel sent {:?}", &msg);
-			if msg.h.set_id < self.largest_set_id_yielded {
+			if msg.h.id == SPECIAL {
+				println!("NO SEQ NUM");
+				return Some(msg.payload)
+			} else if msg.h.set_id < self.largest_set_id_yielded {
 				println!("TOO OLD");
-				println!("DROPPING MSG {:?}", &msg);
 			} else if msg.h.wait_until > self.n {
 				println!("NOT YET");
 				if !self.inbox.got_already(msg.h.id) {
 					println!("STORING");
 					self.inbox.store(msg);
 				}
+			} else if self.seen_before.contains(&msg.h.id) {
+				println!("seen before!");
 			} else {
-				let (header, payload) = (msg.h, msg.payload);
-				println!("YES can recv IN PLACE :)");
-				self.largest_set_id_yielded = header.set_id;
-				if self.n < header.set_id {
-					self.n = header.set_id;
-					println!("n set to set_id={}", self.n);
-				}
-				if header.del {
-					self.n += 1;
-					println!("incrementing n because del. now is {}", self.n);
-				}
-				return Some(payload)
+				self.pre_yield(&msg);
+				println!("yeilding in-place...");
+				return Some(msg.payload)
 			}
 		}
 		println!("SIMPLY NO MSG");
@@ -171,7 +176,10 @@ enum Guarantee {
 
 //////////////////////////
 
+
 type ModOrd = usize;
+
+const SPECIAL: ModOrd = 0xFF_FF_FF_FF;
 
 #[derive(Debug)]
 struct X<'a> {
@@ -193,16 +201,19 @@ impl<'a> X<'a> {
 	}
 
 	fn send(&mut self, guarantee: Guarantee, payload: &str) {
+		let id = if guarantee == Guarantee::None {SPECIAL} else {self.set_id + self.count};
 		let header = Header {
 			set_id: self.set_id,
-			id: self.set_id + self.count,
+			id,
 			wait_until: self.endpoint.wait_until,
 			del: guarantee == Guarantee::Delivery,
 		};
 		println!("sending with g:{:?}. header is {:?}", guarantee, &header);
-		self.count += 1;
-		if guarantee != Guarantee::Delivery {
-			self.ord_count += 1;
+		if guarantee != Guarantee::None {
+			self.count += 1;
+			if guarantee != Guarantee::Delivery {
+				self.ord_count += 1;
+			}
 		}
 		self.endpoint.channel.send(
 			Message {
@@ -222,7 +233,7 @@ impl<'a> Drop for X<'a> {
 
 /////////////////////////////////
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Header {
 	id: ModOrd,
 	del: bool,
@@ -237,13 +248,18 @@ fn zoop() {
 
 	println!("YAY");
 	let mut e = Endpoint::new(channel);
+	e.send(Guarantee::Delivery, "0a");
 	e.x_do(|mut s| {
-		s.send(Guarantee::Delivery, "A");
-		s.send(Guarantee::Delivery, "B");
+		s.send(Guarantee::Delivery, "1a");
+		s.send(Guarantee::Delivery, "1b");
+		s.send(Guarantee::Delivery, "1c");
+		s.send(Guarantee::Delivery, "1d");
 	});
 	e.x_do(|mut s| {
-		s.send(Guarantee::Delivery, "C");
-		s.send(Guarantee::Delivery, "D");
+		s.send(Guarantee::Ord, "2a");
+		s.send(Guarantee::Ord, "2b");
+		s.send(Guarantee::Ord, "2c");
+		s.send(Guarantee::Ord, "2d");
 	});
 
 	let mut got = vec![];
@@ -256,7 +272,7 @@ fn zoop() {
 
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Message {
 	h: Header,
 	payload: String,
@@ -273,6 +289,7 @@ impl Channel {
 		}
 	}
 	fn send(&mut self, message: Message) {
+		self.messages.push(message.clone());
 		self.messages.push(message);
 	}
 	fn recv(&mut self) -> Option<Message> {
