@@ -31,33 +31,35 @@ impl Inbox {
 			s.insert(key);
 		}
 	}
+
+	pub fn remove(&mut self, id: ModOrd) {
+		if !self.by_id.contains_key(&id) {
+			return;
+		}
+		let key: usize = *self.by_id.get(&id).unwrap();
+		{
+			let msg_ref = self.slab.get(key).unwrap();
+			self.by_id.remove(&msg_ref.h.id);
+			if {
+				let mut set = self.by_until.get_mut(&msg_ref.h.wait_until).unwrap();
+				set.remove(&key);
+				set.len() == 0
+			} {
+				self.by_until.remove(&msg_ref.h.wait_until);
+			}
+		}
+		self.slab.remove(key);
+	}
+
 	pub fn try_fetch(&mut self, n: usize) -> Option<Message> {
-		let mut found = None;
-		'outer:
 		for (&until, mut key_set) in self.by_until.iter_mut() {
 			if until <= n {
 				for key in key_set.iter().cloned() {
-					found = Some(key);
-					break 'outer;
+					return Some(self.slab.get(key).unwrap().clone()) // TODO
 				}
 			}
 		}
-		if let Some(key) = found {
-			{
-				let msg_ref = self.slab.get(key).unwrap();
-				self.by_id.remove(&msg_ref.h.id);
-				if {
-					let mut set = self.by_until.get_mut(&msg_ref.h.wait_until).unwrap();
-					set.remove(&key);
-					set.len() == 0
-				} {
-					self.by_until.remove(&msg_ref.h.wait_until);
-				}
-			}
-			Some(self.slab.remove(key))
-		} else {
-			None
-		}
+		None
 	}
 }
 
@@ -72,6 +74,7 @@ struct Endpoint {
 	largest_set_id_yielded: usize,
 	inbox: Inbox,
 	seen_before: HashSet<ModOrd>,
+	to_remove: Option<ModOrd>, // remove from store
 }
 
 impl Endpoint {
@@ -89,6 +92,7 @@ impl Endpoint {
 			largest_set_id_yielded: 0,
 			inbox: Inbox::new(),
 			seen_before: HashSet::new(),
+			to_remove: None,
 		}
 	}
 
@@ -97,26 +101,32 @@ impl Endpoint {
 		t.send(guarantee, payload);
 	}
 
-	fn pre_yield(&mut self, msg: &Message) {
-		if msg.h.set_id > self.largest_set_id_yielded {
-			self.largest_set_id_yielded = msg.h.set_id;
+	fn pre_yield(&mut self, h: &Header) {
+		if h.set_id > self.largest_set_id_yielded {
+			self.largest_set_id_yielded = h.set_id;
 			self.seen_before.clear();
 		}
-		self.seen_before.insert(msg.h.id);
-		if self.n < msg.h.set_id {
-			self.n = msg.h.set_id;
+		self.seen_before.insert(h.id);
+		if self.n < h.set_id {
+			self.n = h.set_id;
 			println!("n set to set_id={}", self.n);
 		}
-		if msg.h.del {
+		if h.del {
 			self.n += 1;
 			println!("incrementing n because del. now is {}", self.n);
 		}
 	}
 
 	pub fn recv(&mut self) -> Option<String> {
+		// resolve to_remove
+		if let Some(r) = self.to_remove {
+			self.inbox.remove(r);
+		}
+
 		// first try inbox
 		if let Some(msg) = self.inbox.try_fetch(self.n) {
-			self.pre_yield(&msg);
+			self.to_remove = Some(msg.h.id);
+			self.pre_yield(&msg.h);
 			println!("yeilding from store...");
 			return Some(msg.payload);
 		}
@@ -139,7 +149,7 @@ impl Endpoint {
 			} else if self.seen_before.contains(&msg.h.id) {
 				println!("seen before!");
 			} else {
-				self.pre_yield(&msg);
+				self.pre_yield(&msg.h);
 				println!("yeilding in-place...");
 				return Some(msg.payload)
 			}
@@ -248,18 +258,14 @@ fn zoop() {
 
 	println!("YAY");
 	let mut e = Endpoint::new(channel);
-	e.send(Guarantee::Delivery, "0a");
+	e.send(Guarantee::None, "0a");
 	e.x_do(|mut s| {
-		s.send(Guarantee::Delivery, "1a");
-		s.send(Guarantee::Delivery, "1b");
-		s.send(Guarantee::Delivery, "1c");
-		s.send(Guarantee::Delivery, "1d");
+		s.send(Guarantee::Ord, "1a");
+		s.send(Guarantee::Ord, "1b");
 	});
 	e.x_do(|mut s| {
 		s.send(Guarantee::Ord, "2a");
 		s.send(Guarantee::Ord, "2b");
-		s.send(Guarantee::Ord, "2c");
-		s.send(Guarantee::Ord, "2d");
 	});
 
 	let mut got = vec![];
