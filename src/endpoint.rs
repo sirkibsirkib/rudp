@@ -13,7 +13,10 @@ use std::{
 use byteorder::{ReadBytesExt, WriteBytesExt};
 use mod_ord::ModOrd;
 
+/*
 
+
+*/
 #[derive(Debug)]
 pub struct Endpoint<U: UdpLike> {
 	//both in and out
