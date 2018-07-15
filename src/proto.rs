@@ -15,6 +15,7 @@ use rand::{thread_rng, Rng};
 use byteorder::{ReadBytesExt, WriteBytesExt};
 // use indexmap::IndexMap;
 use mod_ord::ModOrd;
+use mio::*;
 
 /*
 TODO
@@ -27,6 +28,7 @@ TODO
 - verify contents of incoming headers
 --- ensure sequence numbers are all reasonable and within window
 --- check a secret NONCE that is set by the user
+- rudp server. takes bind address and 
 */
 
 struct EndpointConfig {
@@ -542,16 +544,39 @@ impl BadUdp {
 	}
 }
 
+
+trait UdpLike: Sized {
+	fn send(&mut self, buf: &[u8]) -> io::Result<usize>;
+	fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+}
+
+impl UdpLike for UdpSocket {
+	fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
+		UdpSocket::send(self, buf)
+	}
+	fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		UdpSocket::recv(self, buf)
+	}
+}
+
+impl UdpLike for BadUdp {
+	fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
+		BadUdp::send(self, buf)
+	}
+	fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		BadUdp::recv(self, buf)
+	}
+}
+
 //////////////////////// TEST////////////////
 
 /*
-			TODO
-			this test needs to be fixed 
-
+	This tests a fake connection of some endpoint with itself
+	the BadUdp object will connect messages but duplicate and jumble
+	them before sending (no loss).
 */
-
 #[test]
-fn zoop() {
+fn bad_udp() {
 
 	let socket = BadUdp::new();
 	let mut config = EndpointConfig::default();
@@ -609,10 +634,13 @@ fn zoop() {
 	println!("E {:#?}", e);
 }
 
-
-use mio::*;
+/*
+	This test will check how well Rudp plays with MIO
+	the idea is to set up a proper communication channel between two
+	endpoints
+*/
 #[test]
-fn chatting() {
+fn mio_pair() {
 	let poll = Poll::new().unwrap();
 	let mut events = Events::with_capacity(128);
 	let addrs = ["127.0.0.1:8888".parse().unwrap(), "127.0.0.1:8889".parse().unwrap()];
@@ -625,27 +653,4 @@ fn chatting() {
 		};
 		[f(0, 1), f(1, 0)]
 	};
-}
-
-trait UdpLike: Sized {
-	fn send(&mut self, buf: &[u8]) -> io::Result<usize>;
-	fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-}
-
-impl UdpLike for UdpSocket {
-	fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
-		UdpSocket::send(self, buf)
-	}
-	fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-		UdpSocket::recv(self, buf)
-	}
-}
-
-impl UdpLike for BadUdp {
-	fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
-		BadUdp::send(self, buf)
-	}
-	fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-		BadUdp::recv(self, buf)
-	}
 }
