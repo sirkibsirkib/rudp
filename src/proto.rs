@@ -3,6 +3,7 @@ use rand::{thread_rng, Rng};
 use std::collections::{HashMap, HashSet};
 use byteorder::{ReadBytesExt, WriteBytesExt};
 use std::io;
+use std::fmt;
 use std::net::UdpSocket;
 use std::io::{
 	Read,
@@ -12,11 +13,36 @@ use std::iter;
 
 use mod_ord::ModOrd;
 
+/*
+TODO
+- organize imports
+- log(n) means of scanning inbox
+- io::Write interface for sending
+- buffered written messages?
+- acknowledgements
+*/
+
+#[derive(Debug, Clone, Copy)]
+struct EndpointConfig {
+	pub max_msg_size: usize,
+	pub buffer_grow_space: usize,
+}
+impl EndpointConfig {
+
+	fn default() -> Self {
+		EndpointConfig {
+			max_msg_size: 2048,
+			buffer_grow_space: 1024,
+		}
+	}
+}
+
+type Socket = BadUdp;
 #[derive(Debug)]
 struct Endpoint {
 	//both in and out
-	socket: BadUdp,
-	// channel: Channel,
+	config: EndpointConfig,
+	socket: Socket,
 	buf: Vec<u8>,
 	buf_free_start: usize,
 
@@ -27,14 +53,11 @@ struct Endpoint {
 	//incoming
 	n: ModOrd,
 	largest_set_id_yielded: ModOrd,
-	seen_before: HashSet<ModOrd>,
+	seen_before: HashSet<ModOrd>, // contains messages only in THIS set
 	inbox: HashMap<ModOrd, Message>,
 	inbox2: HashMap<ModOrd, OwnedMessage>, 
 	inbox2_to_remove: Option<ModOrd>,
 }
-
-const MAX_MSG_SIZE: usize = 64;
-const BUF_EXTRA_SPACE: usize = 0;
 
 impl Endpoint {
 	pub fn drop_my_ass(&mut self, count: u32, ord_count: u32) {
@@ -42,11 +65,14 @@ impl Endpoint {
 		self.wait_until = self.next_id.new_minus(ord_count);
 	}
 
-	pub fn new(socket: BadUdp) -> Self {
+	pub fn new_with_config(socket: Socket, config: EndpointConfig) -> Self {
 		Endpoint {
+			config,
 			socket,
 			// channel,
-			buf: iter::repeat(0).take(MAX_MSG_SIZE + BUF_EXTRA_SPACE).collect(),
+			buf: iter::repeat(0)
+				.take(config.max_msg_size + config.buffer_grow_space)
+				.collect(),
 			buf_free_start: 0,
 			next_id: ModOrd::ZERO,
 			wait_until: ModOrd::ZERO,
@@ -57,6 +83,10 @@ impl Endpoint {
 			seen_before: HashSet::new(),
 			inbox2_to_remove: None,
 		}
+	}
+
+	pub fn new(socket: Socket) -> Self {
+		Self::new_with_config(socket, EndpointConfig::default())
 	}
 
 	pub fn send(&mut self, guarantee: Guarantee, payload: &[u8]) -> io::Result<usize> {
@@ -150,7 +180,7 @@ impl Endpoint {
 		loop {
 			// move messages from inbox1 to inbox2 to make space for a recv
 			println!("SPACE IS {}", self.buf.len() - self.buf_free_start);
-			if self.buf.len() - self.buf_free_start < MAX_MSG_SIZE {
+			if self.buf.len() - self.buf_free_start < self.config.max_msg_size {
 				println!("HAVE TO VACATE");
 				self.vacate_inbox1();
 			}
@@ -273,12 +303,6 @@ impl<'a> X<'a> {
 				self.ord_count += 1;
 			}
 		}
-		// self.endpoint.channel.send(
-		// 	Message {
-		// 		h: header,
-		// 		payload: payload.to_owned(),
-		// 	}
-		// );
 		Ok(bytes_sent)
 	}
 }
@@ -322,16 +346,14 @@ impl Header {
 
 #[test]
 fn zoop() {
-	// let channel = Channel::new();
-	// let socket = UdpSocket::bind("127.0.0.1:8888")
-	// .expect("Failed to bind!");
-	// socket.set_nonblocking(true).unwrap();
-	// socket.connect("127.0.0.1:8888").unwrap();
 
 	let socket = BadUdp::new();
+	let mut config = EndpointConfig::default();
+	config.max_msg_size = 32;
+	config.buffer_grow_space = 16;
 
 	println!("YAY");
-	let mut e = Endpoint::new(socket);
+	let mut e = Endpoint::new_with_config(socket, config);
 	e.send(Guarantee::Delivery, b"thats a lotta damage");
 	e.as_set(|mut s| {
 		s.send(Guarantee::Delivery, b"1a");
@@ -341,7 +363,7 @@ fn zoop() {
 		s.send(Guarantee::Delivery, b"2a");
 		s.send(Guarantee::Order, b"2b");
 	});
-	for letter in ('a' as u8)..=('z' as u8) {
+	for letter in ('a' as u8)..=('g' as u8) {
 		e.send(Guarantee::Delivery, &vec![letter]);
 	}
 
@@ -352,14 +374,23 @@ fn zoop() {
 		got.push(out);
 	}
 	println!("got: {:?}", got);
+
+	println!("E {:#?}", e);
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Message {
 	h: Header,
 	payload: *const [u8],
 }
-
+impl fmt::Debug for Message {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "Inbox1Msg {:?} payload ~= {:?}",
+			self.h,
+			String::from_utf8_lossy(unsafe{&*self.payload}),
+		)
+	}
+}
 
 #[derive(Debug, Clone)]
 struct OwnedMessage {
