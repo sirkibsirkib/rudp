@@ -544,64 +544,70 @@ impl BadUdp {
 
 //////////////////////// TEST////////////////
 
-// #[test]
-// fn zoop() {
+/*
+			TODO
+			this test needs to be fixed 
 
-// 	let socket = BadUdp::new();
-// 	let mut config = EndpointConfig::default();
-// 	config.max_msg_size = 16;
-// 	config.buffer_grow_space = 64;
-// 	config.window_size = 32;
+*/
 
-// 	println!("YAY");
-// 	let mut e = Endpoint::new_with_config(socket, config);
+#[test]
+fn zoop() {
 
-// 	e.send(Guarantee::Delivery, b"Dank").unwrap();
-// 	while let Ok(msg) = e.recv() {}
+	let socket = BadUdp::new();
+	let mut config = EndpointConfig::default();
+	config.max_msg_size = 16;
+	config.buffer_grow_space = 64;
+	config.window_size = 32;
 
-// 	e.send(Guarantee::Delivery, b"Lower...").unwrap();
-// 	e.send(Guarantee::Delivery, b"...case").unwrap();
+	println!("YAY");
+	let mut e = Endpoint::new_with_config(socket, config);
 
-// 	e.as_set(|mut s| {
-// 		for letter in ('a' as u8)..=('e' as u8) {
-// 			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
-// 		}
-// 	});
+	e.send(Guarantee::Delivery, b"Dank").unwrap();
+	while let Ok(msg) = e.recv() {}
 
-// 	e.send(Guarantee::Delivery, b"Numbers").unwrap();
+	e.send(Guarantee::Delivery, b"Lower...").unwrap();
+	e.send(Guarantee::Delivery, b"...case").unwrap();
 
-// 	e.as_set(|mut s| {
-// 		for letter in ('1' as u8)..=('3' as u8) {
-// 			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
-// 		}
-// 	});
+	e.as_set(|mut s| {
+		for letter in ('a' as u8)..=('e' as u8) {
+			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
+		}
+	});
 
-// 	e.send(Guarantee::Delivery, b"Up...").unwrap();
-// 	e.send(Guarantee::Delivery, b"...percase").unwrap();
+	e.send(Guarantee::Delivery, b"Numbers").unwrap();
+
+	e.as_set(|mut s| {
+		for letter in ('1' as u8)..=('3' as u8) {
+			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
+		}
+	});
+
+	e.send(Guarantee::Delivery, b"Up...").unwrap();
+	e.send(Guarantee::Delivery, b"...percase").unwrap();
 
 
-// 	e.as_set(|mut s| {
-// 		for letter in ('X' as u8)..=('Z' as u8) {
-// 			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
-// 		}
-// 	});
+	e.as_set(|mut s| {
+		for letter in ('X' as u8)..=('Z' as u8) {
+			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
+		}
+	});
 
-// 	e.send(Guarantee::Delivery, b"Done").unwrap();
+	e.send(Guarantee::Delivery, b"Done").unwrap();
 
-// 	let mut got = vec![];
-// 	while let Ok(msg) = e.recv() {
-// 		let out: String = String::from_utf8_lossy(&msg[..]).to_string();
-// 		println!("--> yielded: {:?}\n", &out);
-// 		got.push(out);
-// 	}
-// 	println!("got: {:?}", got);
-// 	e.send(Guarantee::Delivery, b"wahey").unwrap();
-// 	while let Ok(msg) = e.recv() {}
+	let mut got = vec![];
+	while let Ok(msg) = e.recv() {
+		let out: String = String::from_utf8_lossy(&msg[..]).to_string();
+		println!("--> yielded: {:?}\n", &out);
+		got.push(out);
+	}
+	println!("got: {:?}", got);
+	e.send(Guarantee::Delivery, b"wahey").unwrap();
+	while let Ok(msg) = e.recv() {}
 
-// 	e.resend_lost().unwrap();
+	e.resend_lost().unwrap();
 
-// 	println!("E {:#?}", e);
-// }
+	println!("E {:#?}", e);
+}
 
 
 use mio::*;
@@ -622,15 +628,24 @@ fn chatting() {
 }
 
 trait UdpLike: Sized {
-	fn send(&self, buf: &[u8]) -> io::Result<usize>;
-	fn recv(&self, buf: &mut [u8]) -> io::Result<usize>;
+	fn send(&mut self, buf: &[u8]) -> io::Result<usize>;
+	fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 }
 
 impl UdpLike for UdpSocket {
-	fn send(&self, buf: &[u8]) -> io::Result<usize> {
+	fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
 		UdpSocket::send(self, buf)
 	}
-	fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+	fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		UdpSocket::recv(self, buf)
+	}
+}
+
+impl UdpLike for BadUdp {
+	fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
+		BadUdp::send(self, buf)
+	}
+	fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		BadUdp::recv(self, buf)
 	}
 }
