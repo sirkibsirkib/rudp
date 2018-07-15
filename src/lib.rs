@@ -1,6 +1,6 @@
 extern crate rand;
 extern crate byteorder;
-extern crate indexmap;
+extern crate mio;
 
 mod proto;
 mod mod_ord;

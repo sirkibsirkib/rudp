@@ -8,12 +8,12 @@ use std::{
 		// Read,
 		Write,
 	},
-	net::UdpSocket,
 };
+use mio::net::UdpSocket;
 
 use rand::{thread_rng, Rng};
 use byteorder::{ReadBytesExt, WriteBytesExt};
-use indexmap::IndexMap;
+// use indexmap::IndexMap;
 use mod_ord::ModOrd;
 
 /*
@@ -46,11 +46,10 @@ impl EndpointConfig {
 }
 
 
-type Socket = BadUdp;
 #[derive(Debug)]
-struct Endpoint {
+struct Endpoint<U: UdpLike> {
 	//both in and out
-	socket: Socket,
+	socket: U,
 	buf: Vec<u8>,
 	buf_free_start: usize,
 	max_yielded: ModOrd, // for acking
@@ -75,7 +74,7 @@ struct Endpoint {
 	window_size: u32,
 }
 
-impl Endpoint {
+impl<U> Endpoint<U> where U: UdpLike {
 
 	fn resend_lost(&mut self) -> io::Result<()> {
 		let a = self.peer_acked;
@@ -112,7 +111,7 @@ impl Endpoint {
 		}
 	}
 
-	pub fn new_with_config(socket: Socket, config: EndpointConfig) -> Self {
+	pub fn new_with_config(socket: U, config: EndpointConfig) -> Endpoint<U> {
 		Endpoint {
 			buf_min_space: config.max_msg_size + Header::BYTES,
 			socket,
@@ -136,7 +135,7 @@ impl Endpoint {
 		}
 	}
 
-	pub fn new(socket: Socket) -> Self {
+	pub fn new(socket: U) -> Endpoint<U> {
 		Self::new_with_config(socket, EndpointConfig::default())
 	}
 
@@ -350,13 +349,13 @@ impl Endpoint {
 
 	pub fn as_set<F,R>(&mut self, work: F) -> R
 	where
-		F: Sized + FnOnce(SetSender) -> R,
+		F: Sized + FnOnce(SetSender<U>) -> R,
 		R: Sized,
 	{
 		work(self.get_set())
 	}
 
-	pub fn get_set(&mut self) -> SetSender {
+	pub fn get_set(&mut self) -> SetSender<U> {
 		let set_id = self.next_id;
 		SetSender::new(self, set_id)
 	}
@@ -374,16 +373,16 @@ enum Guarantee {
 //////////////////////////
 
 #[derive(Debug)]
-struct SetSender<'a> {
-	endpoint: &'a mut Endpoint,
+struct SetSender<'a, U: UdpLike + 'a>{
+	endpoint: &'a mut Endpoint<U>,
 	set_id: ModOrd,
 	count: u32,
 	ord_count: u32,
 }
 
-impl<'a> SetSender<'a> {
+impl<'a, U> SetSender<'a, U> where U: UdpLike + 'a {
 
-	fn new(endpoint: &mut Endpoint, set_id: ModOrd) -> SetSender {
+	fn new(endpoint: &mut Endpoint<U>, set_id: ModOrd) -> SetSender<U> {
 		SetSender {
 
 			endpoint,
@@ -438,7 +437,7 @@ impl<'a> SetSender<'a> {
 	}
 }
 
-impl<'a> Drop for SetSender<'a> {
+impl<'a, U> Drop for SetSender<'a, U> where U: UdpLike {
     fn drop(&mut self) {
         println!("Dropping!");
         self.endpoint.drop_my_ass(self.count, self.ord_count)
@@ -545,67 +544,93 @@ impl BadUdp {
 
 //////////////////////// TEST////////////////
 
-#[test]
-fn zoop() {
+// #[test]
+// fn zoop() {
 
-	let socket = BadUdp::new();
-	let mut config = EndpointConfig::default();
-	config.max_msg_size = 16;
-	config.buffer_grow_space = 64;
-	config.window_size = 32;
+// 	let socket = BadUdp::new();
+// 	let mut config = EndpointConfig::default();
+// 	config.max_msg_size = 16;
+// 	config.buffer_grow_space = 64;
+// 	config.window_size = 32;
 
-	println!("YAY");
-	let mut e = Endpoint::new_with_config(socket, config);
+// 	println!("YAY");
+// 	let mut e = Endpoint::new_with_config(socket, config);
 
-	e.send(Guarantee::Delivery, b"Dank").unwrap();
-	while let Ok(msg) = e.recv() {}
+// 	e.send(Guarantee::Delivery, b"Dank").unwrap();
+// 	while let Ok(msg) = e.recv() {}
 
-	e.send(Guarantee::Delivery, b"Lower...").unwrap();
-	e.send(Guarantee::Delivery, b"...case").unwrap();
+// 	e.send(Guarantee::Delivery, b"Lower...").unwrap();
+// 	e.send(Guarantee::Delivery, b"...case").unwrap();
 
-	e.as_set(|mut s| {
-		for letter in ('a' as u8)..=('e' as u8) {
-			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
-		}
-	});
+// 	e.as_set(|mut s| {
+// 		for letter in ('a' as u8)..=('e' as u8) {
+// 			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
+// 		}
+// 	});
 
-	e.send(Guarantee::Delivery, b"Numbers").unwrap();
+// 	e.send(Guarantee::Delivery, b"Numbers").unwrap();
 
-	e.as_set(|mut s| {
-		for letter in ('1' as u8)..=('3' as u8) {
-			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
-		}
-	});
+// 	e.as_set(|mut s| {
+// 		for letter in ('1' as u8)..=('3' as u8) {
+// 			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
+// 		}
+// 	});
 
-	e.send(Guarantee::Delivery, b"Up...").unwrap();
-	e.send(Guarantee::Delivery, b"...percase").unwrap();
-
-
-	e.as_set(|mut s| {
-		for letter in ('X' as u8)..=('Z' as u8) {
-			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
-		}
-	});
-
-	e.send(Guarantee::Delivery, b"Done").unwrap();
-
-	let mut got = vec![];
-	while let Ok(msg) = e.recv() {
-		let out: String = String::from_utf8_lossy(&msg[..]).to_string();
-		println!("--> yielded: {:?}\n", &out);
-		got.push(out);
-	}
-	println!("got: {:?}", got);
-	e.send(Guarantee::Delivery, b"wahey").unwrap();
-	while let Ok(msg) = e.recv() {}
-
-	e.resend_lost().unwrap();
-
-	println!("E {:#?}", e);
-}
+// 	e.send(Guarantee::Delivery, b"Up...").unwrap();
+// 	e.send(Guarantee::Delivery, b"...percase").unwrap();
 
 
+// 	e.as_set(|mut s| {
+// 		for letter in ('X' as u8)..=('Z' as u8) {
+// 			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
+// 		}
+// 	});
+
+// 	e.send(Guarantee::Delivery, b"Done").unwrap();
+
+// 	let mut got = vec![];
+// 	while let Ok(msg) = e.recv() {
+// 		let out: String = String::from_utf8_lossy(&msg[..]).to_string();
+// 		println!("--> yielded: {:?}\n", &out);
+// 		got.push(out);
+// 	}
+// 	println!("got: {:?}", got);
+// 	e.send(Guarantee::Delivery, b"wahey").unwrap();
+// 	while let Ok(msg) = e.recv() {}
+
+// 	e.resend_lost().unwrap();
+
+// 	println!("E {:#?}", e);
+// }
+
+
+use mio::*;
 #[test]
 fn chatting() {
-	
+	let poll = Poll::new().unwrap();
+	let mut events = Events::with_capacity(128);
+	let addrs = ["127.0.0.1:8888".parse().unwrap(), "127.0.0.1:8889".parse().unwrap()];
+	let endpoints = {
+		let f = |me_id, peer_id| {
+			let sock = UdpSocket::bind(&addrs[me_id]).unwrap();
+			sock.connect(addrs[peer_id]).unwrap();
+			poll.register(&sock, Token(me_id), Ready::readable(), PollOpt::edge()).unwrap();
+			Endpoint::new(sock)
+		};
+		[f(0, 1), f(1, 0)]
+	};
+}
+
+trait UdpLike: Sized {
+	fn send(&self, buf: &[u8]) -> io::Result<usize>;
+	fn recv(&self, buf: &mut [u8]) -> io::Result<usize>;
+}
+
+impl UdpLike for UdpSocket {
+	fn send(&self, buf: &[u8]) -> io::Result<usize> {
+		UdpSocket::send(self, buf)
+	}
+	fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+		UdpSocket::recv(self, buf)
+	}
 }

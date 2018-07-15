@@ -4,12 +4,7 @@ version = "0.1.0"
 authors = ["sirkibsirkib <christopher.esterhuyse@gmail.com>"]
 
 [dependencies]
-# crossbeam-channel = "0.2"
-# bincode = "1.0"
-# serde = "1.0"
-# serde_derive = "1.0"
-# erased-serde = "0.3"
 byteorder = "1.2"
 rand = "0.5.4"
 slab = "0.4"
-indexmap = "1.0.1"
+mio = "0.6.15"
