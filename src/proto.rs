@@ -206,9 +206,7 @@ impl Endpoint {
 		None
 	}
 
-	fn vacate_inbox1(&mut self) {
-		// println!("JK NOT VACATING");
-		// return;
+	fn vacate_buffer(&mut self) {
 		println!("VACATING INBOX 1 --> INBOX 2...");
 		let mut count = 0;
 		for (id, msg) in self.inbox.drain() {
@@ -222,7 +220,18 @@ impl Endpoint {
 			count += 1;
 		}
 		assert!(self.inbox.is_empty());
-		println!("VACATING COMPLETE. MOVED {} messages", count);
+		println!("VACATING COMPLETE. MOVED {} INBOX messages", count);
+
+		println!("VACATING OUTBOX 1 --> OUTBOX 2...");
+		let mut count = 0;
+		for (id, bytes) in self.outbox.drain() {
+			let vec = unsafe{&*bytes}.to_vec();
+			println!("- VACATING MESSAGE WITH ID {:?} ({} bytes)...", id, vec.len());
+			self.outbox2.insert(id, vec);
+			count += 1;
+		}
+		assert!(self.inbox.is_empty());
+		println!("VACATING COMPLETE. MOVED {} INBOX messages", count);
 		self.buf_free_start = 0;
 	}
 
@@ -232,6 +241,10 @@ impl Endpoint {
 	  	self.seen_before.contains(&id)
 		|| self.inbox.contains_key(&id)
 		|| self.inbox2.contains_key(&id) 
+	}
+
+	pub fn buf_cant_take_another(&self) -> bool {
+		self.buf.len() - self.buf_free_start < self.buf_min_space
 	}
 
 	pub fn recv(&mut self) -> io::Result<&[u8]> {
@@ -253,7 +266,7 @@ impl Endpoint {
 			println!("getting id {:?} from inbox1 with {:?}", id, &msg.h);
 			if self.inbox.is_empty() {
 				println!("VACATING INTENTIONALLY (trivial)");
-				self.vacate_inbox1();
+				self.vacate_buffer();
 			}
 			self.pre_yield(msg.h.set_id, msg.h.id, msg.h.del);
 			println!("yeilding from store 1...");
@@ -285,10 +298,10 @@ impl Endpoint {
 		loop {
 			println!("largest_set_id_yielded {:?}", self.largest_set_id_yielded);
 			println!("SPACE IS {}", self.buf.len() - self.buf_free_start);
-			if self.buf.len() - self.buf_free_start < self.buf_min_space {
+			if self.buf_cant_take_another() {
 			// move messages from inbox1 to inbox2 to make space for a recv
 				println!("HAVE TO VACATE");
-				self.vacate_inbox1();
+				self.vacate_buffer();
 			}
 
 			println!("recv loop..");
@@ -385,6 +398,10 @@ impl<'a> X<'a> {
 	}
 
 	fn send(&mut self, guarantee: Guarantee, payload: &[u8]) -> io::Result<usize> {
+		if self.endpoint.buf_cant_take_another() {
+			println!("VACATING BUFFER for SEND");
+			self.endpoint.vacate_buffer();
+		}
 		let id = if guarantee == Guarantee::None {
 			ModOrd::SPECIAL
 		} else {
@@ -400,14 +417,20 @@ impl<'a> X<'a> {
 
 		let buf_offset = self.endpoint.buf_free_start;
 		let bytes_sent: usize = {
-			let mut w = &mut self.endpoint.buf[buf_offset..];
+			let mut w = &mut self.endpoint.buf[self.endpoint.buf_free_start..];
 			let len = w.write(payload)?;
 			header.write_to(w)?;
 			len + Header::BYTES
 		};
-		self.endpoint.socket.send(
-			& self.endpoint.buf[buf_offset..(buf_offset+bytes_sent)]
-		)?;
+		let new_end = self.endpoint.buf_free_start + bytes_sent;
+		let msg_slice = & self.endpoint.buf[self.endpoint.buf_free_start..new_end];
+		self.endpoint.socket.send(msg_slice)?;
+
+		if guarantee == Guarantee::Delivery {
+			// save into outbox and bump the buffer up
+			self.endpoint.outbox.insert(id, msg_slice as *const [u8]);
+			self.endpoint.buf_free_start = new_end;
+		}
 
 		println!("sending with g:{:?}. header is {:?}", guarantee, &header);
 		if guarantee != Guarantee::None {
