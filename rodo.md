@@ -1,3 +1,20 @@
+
+/*
+TODO
+- organize imports
+- log(n) means of scanning inbox
+- io::Write interface for sending
+- buffered written messages?
+- acknowledgements and explicit RESEND_LOST
+- encrypt message headers. 
+- verify contents of incoming headers
+--- ensure sequence numbers are all reasonable and within window
+--- check a secret NONCE that is set by the user
+- rudp server. takes bind address and 
+*/
+
+
+
 # TODO
 1. nail down io::Write API to work with serialization
 1. translate strings into bytes
