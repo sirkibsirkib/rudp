@@ -3,6 +3,7 @@
 use std::{
 	collections::{HashMap, HashSet},
 	io, fmt, time, iter, cmp,
+	time::Instant,
 	io::{
 		// Read,
 		Write,
@@ -31,6 +32,7 @@ TODO
 struct EndpointConfig {
 	pub max_msg_size: usize,
 	pub buffer_grow_space: usize,
+	pub window_size: u32,
 	// pub must_resend_func: Box<FnMut(u32, time::Duration) -> bool>,
 }
 impl EndpointConfig {
@@ -38,52 +40,10 @@ impl EndpointConfig {
 		EndpointConfig {
 			max_msg_size: 2048,
 			buffer_grow_space: 1024,
+			window_size: 64,
 		}
 	}
 }
-
-// struct InboxMap {
-// 	map: IndexMap<ModOrd, HashSet<Message>>,
-// }
-
-// fn some_id(msgs: &HashSet<Message>) -> Option<ModOrd> {
-// 	for msg in msgs {
-// 		return msg.h.id;
-// 	}
-// 	None
-// }
-
-// impl InboxMap {
-// 	pub fn add(&mut self, msg: Message) {
-// 		let wait_until = msg.h.wait_until;
-// 		let mut resort = false;
-// 		let e = self.map.entry(&wait_until).or_insert_with(
-// 			|| {resort = true; HashMap::new()}
-// 		);
-// 		map.sort_keys();
-// 	}
-
-// 	pub fn get(&mut self, n: ModOrd) -> Option<&Message> {
-// 		for (wait_until, set) in self.map.iter() {
-// 			if wait_until > n {
-// 				// wont be ready. neither will anything afterward
-// 				break;
-// 			}
-// 			if let Some(id) = some_id(set) {
-
-// 			}
-// 		}
-// 		None
-// 	}
-
-// 	pub fn remove(&mut self, wait_until: ModOrd, id: ModOrd) {
-
-// 	}
-
-// 	pub fn contains(&mut self, header: &Header) -> bool {
-// 		unimplemented!()
-// 	}
-// }
 
 
 type Socket = BadUdp;
@@ -100,8 +60,9 @@ struct Endpoint {
 	next_id: ModOrd,
 	wait_until: ModOrd,
 	 // only stores delivery messages
-	outbox: HashMap<ModOrd, *const [u8]>,
-	outbox2: HashMap<ModOrd, Vec<u8>>,
+	outbox: HashMap<ModOrd, (Instant, *const [u8])>,
+	outbox2: HashMap<ModOrd, (Instant, Vec<u8>)>,
+	peer_acked: ModOrd,
 
 	//incoming
 	buf_min_space: usize,
@@ -111,10 +72,35 @@ struct Endpoint {
 	inbox: HashMap<ModOrd, Message>,
 	inbox2: HashMap<ModOrd, OwnedMessage>, 
 	inbox2_to_remove: Option<ModOrd>,
+	window_size: u32,
 }
 
 impl Endpoint {
-	pub fn drop_my_ass(&mut self, count: u32, ord_count: u32) {
+
+	fn resend_lost(&mut self) -> io::Result<()> {
+		let a = self.peer_acked;
+		self.outbox.retain(|&id, _| id > a);
+		self.outbox2.retain(|&id, _| id > a);
+		let now = Instant::now();
+		for (id, (ref mut instant, ref_bytes)) in self.outbox.iter_mut() {
+			if Self::too_stale_func(id.abs_difference(self.n), instant.elapsed()) {
+				//resend
+				self.socket.send(unsafe{&**ref_bytes})?;
+				*instant = now;
+			}
+		}
+		for (id, (ref mut instant, ref vec)) in self.outbox2.iter_mut() {
+			if Self::too_stale_func(id.abs_difference(self.n), instant.elapsed()) {
+				//resend
+				self.socket.send(&vec[..])?;
+				*instant = now;
+			}
+		}
+		Ok(())
+	}
+
+
+	fn drop_my_ass(&mut self, count: u32, ord_count: u32) {
 		if count == 0 {
 			// no need to waste a perfectly good sequence number
 			return;
@@ -145,6 +131,8 @@ impl Endpoint {
 			max_yielded: ModOrd::BEFORE_ZERO,
 			outbox: HashMap::new(),
 			outbox2: HashMap::new(),
+			peer_acked: ModOrd::BEFORE_ZERO,
+			window_size: config.window_size,
 		}
 	}
 
@@ -224,14 +212,14 @@ impl Endpoint {
 
 		println!("VACATING OUTBOX 1 --> OUTBOX 2...");
 		let mut count = 0;
-		for (id, bytes) in self.outbox.drain() {
+		for (id, (instant, bytes)) in self.outbox.drain() {
 			let vec = unsafe{&*bytes}.to_vec();
 			println!("- VACATING MESSAGE WITH ID {:?} ({} bytes)...", id, vec.len());
-			self.outbox2.insert(id, vec);
+			self.outbox2.insert(id, (instant, vec));
 			count += 1;
 		}
 		assert!(self.inbox.is_empty());
-		println!("VACATING COMPLETE. MOVED {} INBOX messages", count);
+		println!("VACATING COMPLETE. MOVED {} OUTBOX messages", count);
 		self.buf_free_start = 0;
 	}
 
@@ -264,7 +252,7 @@ impl Endpoint {
 		if let Some(id) = self.ready_from_inbox() {
 			let msg = self.inbox.remove(&id).unwrap();
 			println!("getting id {:?} from inbox1 with {:?}", id, &msg.h);
-			if self.inbox.is_empty() {
+			if self.inbox.is_empty() && self.outbox.is_empty() {
 				println!("VACATING INTENTIONALLY (trivial)");
 				self.vacate_buffer();
 			}
@@ -311,6 +299,15 @@ impl Endpoint {
 					assert!(bytes >= Header::BYTES);
 					let h_starts_at = self.buf_free_start + bytes - Header::BYTES;
 					let h = Header::read_from(& self.buf[h_starts_at..])?;
+					if self.peer_acked < h.ack {
+						self.peer_acked = h.ack;
+						println!("peer ack is now {:?}", self.peer_acked);
+					}
+
+					if self.largest_set_id_yielded.abs_difference(h.set_id) > self.window_size {
+						println!("OUTSIDE OF WINDOW");
+						continue;
+					}
 
 					if self.known_duplicate(&h) {
 						println!("DROPPING KNOWN DUPLICATE {:?}", h);
@@ -352,18 +349,15 @@ impl Endpoint {
 
 	pub fn as_set<F,R>(&mut self, work: F) -> R
 	where
-		F: Sized + FnOnce(X) -> R,
+		F: Sized + FnOnce(SetSender) -> R,
 		R: Sized,
 	{
 		work(self.get_set())
 	}
 
-	pub fn get_set(&mut self) -> X {
+	pub fn get_set(&mut self) -> SetSender {
 		let set_id = self.next_id;
-		X::new(
-			self,
-			set_id,
-		)
+		SetSender::new(self, set_id)
 	}
 }
 
@@ -379,17 +373,18 @@ enum Guarantee {
 //////////////////////////
 
 #[derive(Debug)]
-struct X<'a> {
+struct SetSender<'a> {
 	endpoint: &'a mut Endpoint,
 	set_id: ModOrd,
 	count: u32,
 	ord_count: u32,
 }
 
-impl<'a> X<'a> {
+impl<'a> SetSender<'a> {
 
-	fn new(endpoint: &mut Endpoint, set_id: ModOrd) -> X {
-		X {
+	fn new(endpoint: &mut Endpoint, set_id: ModOrd) -> SetSender {
+		SetSender {
+
 			endpoint,
 			set_id,
 			count: 0,
@@ -415,7 +410,6 @@ impl<'a> X<'a> {
 			del: guarantee == Guarantee::Delivery,
 		};
 
-		let buf_offset = self.endpoint.buf_free_start;
 		let bytes_sent: usize = {
 			let mut w = &mut self.endpoint.buf[self.endpoint.buf_free_start..];
 			let len = w.write(payload)?;
@@ -428,7 +422,7 @@ impl<'a> X<'a> {
 
 		if guarantee == Guarantee::Delivery {
 			// save into outbox and bump the buffer up
-			self.endpoint.outbox.insert(id, msg_slice as *const [u8]);
+			self.endpoint.outbox.insert(id, (Instant::now(), msg_slice as *const [u8]));
 			self.endpoint.buf_free_start = new_end;
 		}
 
@@ -443,7 +437,7 @@ impl<'a> X<'a> {
 	}
 }
 
-impl<'a> Drop for X<'a> {
+impl<'a> Drop for SetSender<'a> {
     fn drop(&mut self) {
         println!("Dropping!");
         self.endpoint.drop_my_ass(self.count, self.ord_count)
@@ -555,8 +549,9 @@ fn zoop() {
 
 	let socket = BadUdp::new();
 	let mut config = EndpointConfig::default();
-	config.max_msg_size = 64;
-	config.buffer_grow_space = 32;
+	config.max_msg_size = 16;
+	config.buffer_grow_space = 64;
+	config.window_size = 32;
 
 	println!("YAY");
 	let mut e = Endpoint::new_with_config(socket, config);
@@ -572,6 +567,11 @@ fn zoop() {
 	// 	s.send(Guarantee::Delivery, b"2a")?;
 	// 	s.send(Guarantee::Order, b"2b")
 	// }).unwrap();
+
+	e.send(Guarantee::Delivery, b"Dank").unwrap();
+	while let Ok(msg) = e.recv() {
+
+	}
 
 
 
@@ -611,6 +611,12 @@ fn zoop() {
 		got.push(out);
 	}
 	println!("got: {:?}", got);
+	e.send(Guarantee::Delivery, b"wahey").unwrap();
 
-	// println!("E {:#?}", e);
+	while let Ok(msg) = e.recv() {
+	}
+
+	e.resend_lost().unwrap();
+
+	println!("E {:#?}", e);
 }
