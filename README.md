@@ -1,26 +1,46 @@
-# Rudp
-* udp with opt-in reliability mechanisms like tdp.
-* particularly useful if you need reliability _some_ of the time.
+# Reliable UDP
 
-## API
-You interact with an Endpoint() object. created with your input UdpSocket.
-send() and recv(). recv() may block depending on your socket settings.
+## What RUDP is for
+RUDP builds familiar TCP-like reliability mechanisms on top of UDP that can
+drop in _as desired_. RUDP is intended for cases where you want to send
+UDP-like datagrams and don't always need the strict ordering and delivery
+guarantees TCP provides. RUDP exposes some mechanisms for the user to express
+_which_ guarantees are needed for which messages. Weaker guarantees translate
+to less bookkeeping and buffering, hopefully translating to speed.
 
-## Relaxing guarantees
-### Send types
-each message you send is given (as parameter) a `classification` for the guarantees it will have.
-weaker guarantees incur less overhead. Be as sparing as possible for best performance.
+What RUDP already provides:
+1. Byte grainularity and the `io::Write` API to go with it. This minimizes redundant copying (eg: you can `serde`-serialize into the outbound-buffer without copying).
+1. Flag each sent message independently to determine the guarantees RUDP will provide for it. 
+	1. 'None': UDP behavior. Unordered, not unique, and may get lost.
+	2. 'Order': Message will respect ordering and won't arrive redundantly. May get lost.
+	3. 'Delivery': TCP behaviour. Ordered, unique, and won't get lost.
+1. The user can group messages into _sets_ on the fly. This relaxes the ordering guarantees _only within the set_ but preserves it otherwise. Useful for sending a "group" of messages.
+1. Configuration to tweak the size of buffers, etc.
 
-classes:
-* Delivery: each send() will be ordered wrt. other sends. Will arrive exactly once.
-* Order: each send() will be ordered wrt. other sends. Will arrive at most once.
-* None: send will be neither ordered, nor guaranteed to arrive.
+What RUDP is planned to provide:
+1. Optional encryption of headers + nonce fields to make injection more difficult
+1. Automatic grouping of small payloads into larger UDP Datagrams under the hood.
+1. Additional configuration to control when heartbeats and re-sending of 
+unacknowledged delivery-guaranteed datagrams.
 
+What RUDP does not provide:
+1. Some more advanced TCP mechanisms like backpressure control and AIMD.
+1. Autonomous threading to perform heartbeats under the hood. (This is intentional).
+All work is performed in response to the user's explicit calls.
 
-### Message Sets
+## Minimizing copying by using _One Big Buffer_
+All buffered data written in or out goes through one buffer per `Endpoint` struct.
+The size of the buffer is configured and set up-front according to two properties:
+1. The largest single-datagram you want to support.
+1. The extra space you allot for _sliding_.
 
-## Under the Hood
+After the `Endpoint` stores a payload of bytes, the 'start' pointer _slides_ right.
+Auxiliary bookkeeping structures reference the payload as a slice _in place_.
+As messages are yielded to the user or overwritten by new data, pointers are deleted,
+but no payload bytes need to move. Anytime there are no references, the start pointer is reset.
 
-### Inbox buffer
+If there isn't a reset for long enough that the 'start' pointer is approaching the end of the buffer, payloads are copied to a _secondary_ more conventional heap-like storage, and the 'start' pointer is reset. As most data is consumed shortly after it is written, most payloads never reach the secondary storage. 
 
-### Three tiers of inbox storage
+To optimize space utilization, UDP datagrams are given _TAILS_ rather than _HEADERS_,
+so that the unnecessary non-payload space can be overwritten by subsequent writes
+as needed.

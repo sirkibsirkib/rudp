@@ -86,10 +86,8 @@ fn bad_udp() {
 
 	let mut e = Endpoint::new_with_config(socket, config);
 
-	e.send_payload(b"Dank", Delivery).unwrap();
+	e.send_payload(b"Dank :)", Delivery).unwrap();
 	while let Ok(_) = e.recv() {}
-
-	e.send_payload(b"Lower", Guarantee::Delivery).unwrap();
 
 	e.send_payload(b"Lower...", Delivery).unwrap();
 	e.send_payload(b"...case", Delivery).unwrap();
@@ -123,7 +121,7 @@ fn bad_udp() {
 	let mut got = vec![];
 	while let Ok(msg) = e.recv() {
 		let out: String = String::from_utf8_lossy(&msg[..]).to_string();
-		println!("--> yielded: {:?}\n", &out);
+		println!("--> yielded: {:?}", &out);
 		got.push(out);
 	}
 	println!("got: {:?}", got);
@@ -160,15 +158,15 @@ fn mio_pair() {
 
 	let poll_timeout = Duration::from_millis(1000);
 	loop {
-		println!("POLL LOOP...");
+		// println!("POLL LOOP...");
 		poll.poll(&mut events, Some(poll_timeout)).unwrap();
 		for event in events.iter() {
-			println!("event {:?}", event);
+			// println!("event {:?}", event);
 			let endpt = &mut endpoints[event.token().0];
 			let reply: Option<u8> = {
 				if let Ok(msg) = endpt.recv() {
 					println!("msg {:?} ", msg);
-					println!("RECV OVER\n");
+					// println!("RECV OVER\n");
 					if msg[0] < 'd' as u8 {
 						Some(msg[0] + 1)
 					} else {None}
