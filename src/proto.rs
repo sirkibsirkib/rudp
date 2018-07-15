@@ -113,7 +113,10 @@ struct Endpoint {
 impl Endpoint {
 	pub fn drop_my_ass(&mut self, count: u32, ord_count: u32) {
 		self.next_id = self.next_id.new_plus(count);
-		self.wait_until = self.next_id.new_minus(ord_count);
+		println!("ORD CNT {} CNT {}", ord_count, count);
+		if ord_count < count {
+			self.wait_until = self.next_id.new_minus(ord_count);
+		}
 	}
 
 	pub fn new_with_config(socket: Socket, config: EndpointConfig) -> Self {
@@ -193,6 +196,8 @@ impl Endpoint {
 	}
 
 	fn vacate_inbox1(&mut self) {
+		// println!("JK NOT VACATING");
+		// return;
 		println!("VACATING INBOX 1 --> INBOX 2...");
 		let mut count = 0;
 		for (id, msg) in self.inbox.drain() {
@@ -205,6 +210,7 @@ impl Endpoint {
 			self.inbox2.insert(id, owned_msg);
 			count += 1;
 		}
+		assert!(self.inbox.is_empty());
 		println!("VACATING COMPLETE. MOVED {} messages", count);
 		self.buf_free_start = 0;
 	}
@@ -213,6 +219,7 @@ impl Endpoint {
 
 		// first try in-line inbox
 		if let Some(id) = self.ready_from_inbox() {
+			println!("getting id {:?} from inbox1", id);
 			let msg = self.inbox.remove(&id).unwrap();
 			if self.inbox.is_empty() {
 				println!("VACATING INTENTIONALLY (trivial)");
@@ -225,6 +232,8 @@ impl Endpoint {
 
 		// remove from inbox2 as possible
 		if let Some(id) = self.inbox2_to_remove {
+			println!("getting id {:?} from inbox2", id);
+			println!("removing from inbox2 {:?}", id);
 			self.inbox2_to_remove = None;
 			self.inbox2.remove(&id);
 		} 
@@ -485,20 +494,24 @@ fn zoop() {
 
 	let socket = BadUdp::new();
 	let mut config = EndpointConfig::default();
-	config.max_msg_size = 32;
-	config.buffer_grow_space = 32;
+	config.max_msg_size = 64;
+	config.buffer_grow_space = 0;
 
 	println!("YAY");
 	let mut e = Endpoint::new_with_config(socket, config);
-	e.send(Guarantee::Delivery, b"thats a lotta damage");
-	e.as_set(|mut s| {
-		s.send(Guarantee::Delivery, b"1a")?;
-		s.send(Guarantee::Order, b"1b")
-	}).unwrap();
-	e.as_set(|mut s| {
-		s.send(Guarantee::Delivery, b"2a")?;
-		s.send(Guarantee::Order, b"2b")
-	}).unwrap();
+
+	// e.send(Guarantee::Delivery, b"thats a lotta damage");
+
+	// e.as_set(|mut s| {
+	// 	s.send(Guarantee::Delivery, b"1a")?;
+	// 	s.send(Guarantee::Order, b"1b")
+	// }).unwrap();
+
+	// e.as_set(|mut s| {
+	// 	s.send(Guarantee::Delivery, b"2a")?;
+	// 	s.send(Guarantee::Order, b"2b")
+	// }).unwrap();
+
 	for letter in ('a' as u8)..=('g' as u8) {
 		e.send(Guarantee::Delivery, &vec![letter]).unwrap();
 	}
@@ -511,5 +524,5 @@ fn zoop() {
 	}
 	println!("got: {:?}", got);
 
-	println!("E {:#?}", e);
+	// println!("E {:#?}", e);
 }
