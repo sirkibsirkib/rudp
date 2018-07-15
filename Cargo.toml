@@ -6,5 +6,9 @@ authors = ["sirkibsirkib <christopher.esterhuyse@gmail.com>"]
 [dependencies]
 byteorder = "1.2"
 rand = "0.5.4"
-slab = "0.4"
+
+[dev-dependencies]
 mio = "0.6.15"
+serde = "1.0.70"
+serde_derive = "1.0.70"
+bincode = "1.0.1"

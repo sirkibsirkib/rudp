@@ -1,13 +1,9 @@
 extern crate rand;
 extern crate byteorder;
-extern crate mio;
 
 mod endpoint;
 mod mod_ord;
 mod helper;
-
-#[cfg(test)]
-mod tests;
 
 pub use helper::{
 	Guarantee,
@@ -20,3 +16,20 @@ pub use endpoint::{
 	Endpoint,
 	SetSender,
 };
+
+////////////////////////////////////////////////////////////////
+#[cfg(test)]
+extern crate serde;
+
+#[cfg(test)]
+#[macro_use]
+extern crate serde_derive;
+
+#[cfg(test)]
+extern crate bincode;
+
+#[cfg(test)]
+extern crate mio;
+
+#[cfg(test)]
+mod tests;

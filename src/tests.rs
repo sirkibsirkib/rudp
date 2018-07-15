@@ -14,6 +14,10 @@ use mio::net::UdpSocket;
 use rand::{thread_rng, Rng};
 use mio::*;
 
+
+/*
+A structure that simulates the sending and receiving of UDP messages 
+*/
 #[derive(Debug)]
 struct BadUdp {
 	messages: Vec<Vec<u8>>,
@@ -28,8 +32,11 @@ impl BadUdp {
 
 	fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
 		let m = buf.to_vec();
-		self.messages.push(m.clone());
-		self.messages.push(m);
+		let copies = thread_rng().gen_range(0,3);
+		println!("copies {:?}", copies);
+		for _ in 0..=copies {
+			self.messages.push(m.clone());
+		}
 		Ok(buf.len())
 	}
 
@@ -87,7 +94,7 @@ fn bad_udp() {
 	let mut e = Endpoint::new_with_config(socket, config);
 
 	e.send_payload(b"Dank :)", Delivery).unwrap();
-	while let Ok(_) = e.recv() {}
+	while let Ok(Some(_)) = e.recv() {}
 
 	e.send_payload(b"Lower...", Delivery).unwrap();
 	e.send_payload(b"...case", Delivery).unwrap();
@@ -97,6 +104,7 @@ fn bad_udp() {
 			s.send_payload(&vec![letter], Delivery).unwrap();
 		}
 	});
+
 
 	e.send_payload(b"Numbers", Delivery).unwrap();
 
@@ -119,14 +127,14 @@ fn bad_udp() {
 	e.send_payload(b"Done", Delivery).unwrap();
 
 	let mut got = vec![];
-	while let Ok(msg) = e.recv() {
+	while let Ok(Some(msg)) = e.recv() {
 		let out: String = String::from_utf8_lossy(&msg[..]).to_string();
 		println!("--> yielded: {:?}", &out);
 		got.push(out);
 	}
 	println!("got: {:?}", got);
 	e.send_payload(b"wahey", Delivery).unwrap();
-	while let Ok(_) = e.recv() {}
+	while let Ok(Some(_)) = e.recv() {}
 
 	e.resend_lost().unwrap();
 
@@ -142,6 +150,8 @@ fn bad_udp() {
 fn mio_pair() {
 	let poll = Poll::new().unwrap();
 	let mut events = Events::with_capacity(128);
+
+	// setup connected udp endpoints and register them with mio.
 	let addrs = ["127.0.0.1:8888".parse().unwrap(), "127.0.0.1:8889".parse().unwrap()];
 	let mut endpoints = {
 		let f = |me_id, peer_id| {
@@ -153,8 +163,8 @@ fn mio_pair() {
 		[f(0, 1), f(1, 0)]
 	};
 
+	// start us off with the first message
 	endpoints[0].send_payload(b"a", Guarantee::Delivery).unwrap();
-	println!("SEND OVER\n");
 
 	let poll_timeout = Duration::from_millis(1000);
 	loop {
@@ -163,13 +173,16 @@ fn mio_pair() {
 		for event in events.iter() {
 			// println!("event {:?}", event);
 			let endpt = &mut endpoints[event.token().0];
+
 			let reply: Option<u8> = {
-				if let Ok(msg) = endpt.recv() {
-					println!("msg {:?} ", msg);
+				if let Some(msg) = endpt.recv().unwrap() {
+					println!("msg {:?} ", msg[0] as char);
 					// println!("RECV OVER\n");
-					if msg[0] < 'd' as u8 {
+					if msg[0] < 'z' as u8 {
 						Some(msg[0] + 1)
-					} else {None}
+					} else {
+						return; // test over
+					}
 				} else {None}
 				
 			};
@@ -181,4 +194,31 @@ fn mio_pair() {
         	let _ = endpt.resend_lost();
         }
 	}
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct Data {
+	x: (i8, u8),
+	y: String,
+	z: Vec<f32>,
+}
+
+#[test]
+fn serde() {
+	let a = Data {
+		x: (-32, 22),
+		y: "Hello, there.".to_owned(),
+		z: vec![0., 2., 55., 44., 0.],
+	};
+
+	let mut endpt = Endpoint::new(BadUdp::new());
+
+	bincode::serialize_into(&mut endpt, &a).unwrap();
+	endpt.send_written(Guarantee::Delivery).unwrap();
+	
+	let b = bincode::deserialize(
+		endpt.recv().expect("some msg").expect("no err")
+	).expect("serde ok");
+
+	assert_eq!(a, b);
 }

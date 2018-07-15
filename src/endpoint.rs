@@ -8,9 +8,7 @@ use std::{
 		Instant,
 		Duration,
 	},
-	// io::{
-	// 	Write,
-	// },
+	io::ErrorKind,
 };
 use byteorder::{ReadBytesExt, WriteBytesExt};
 use mod_ord::ModOrd;
@@ -29,7 +27,7 @@ pub struct Endpoint<U: UdpLike> {
 	next_id: ModOrd,
 	wait_until: ModOrd,
 	 // only stores delivery messages
-	outbox: HashMap<ModOrd, (Instant, *const [u8])>,
+	outbox: HashMap<ModOrd, (Instant, *mut [u8])>,
 	outbox2: HashMap<ModOrd, (Instant, Vec<u8>)>,
 	peer_acked: ModOrd,
 	out_buf_written: usize,
@@ -101,26 +99,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 		Self::new_with_config(socket, EndpointConfig::default())
 	}
 
-	// pub fn write_send(&mut self, bytes: &[u8], guarantee: Guarantee) -> io::Result<usize> {
-	// 	self.write(bytes)?;
-	// 	self.send(guarantee)
-	// }
-
-	// pub fn write_all<R: io::Read>(&mut self, mut r: R) -> io::Result<usize> {
-	// 	let mut tot = 0; 
-	// 	loop {
-	// 		match r.read(&mut self.buf[(self.buf_free_start+self.out_buf_written)..]) {
-	// 			Ok(0) => return Ok(tot),
-	// 			Ok(x) => {
-	// 				tot += x;
-	// 				self.out_buf_written += x;
-	// 			},
-	// 			Err(e) => return Err(e),
-	// 		}
-	// 	}
-	// }
-
-	pub fn recv(&mut self) -> io::Result<&[u8]> {
+	pub fn recv(&mut self) -> io::Result<Option<&mut [u8]>> {
 		// println!("largest_set_id_yielded {:?}", self.largest_set_id_yielded);
 		{
 			let intersect: HashSet<ModOrd> = self.inbox.keys().cloned().collect::<HashSet<_>>();
@@ -143,7 +122,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 			self.pre_yield(msg.h.set_id, msg.h.id, msg.h.del);
 			// println!("yeilding from store 1...");
 			self.maybe_ack()?;
-			return Ok(unsafe{&*msg.payload});
+			return Ok(Some(unsafe{&mut *msg.payload}));
 		}
 
 		// remove from inbox2 as possible
@@ -165,7 +144,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 			self.inbox2_to_remove = Some(id); // will remove later
 			// println!("yeilding from store 2...");
 			self.maybe_ack()?;
-			return Ok(&self.inbox2.get(&id).unwrap().payload);
+			return Ok(Some(&mut self.inbox2.get_mut(&id).unwrap().payload));
 		}
 
 		// nothing ready from the inbox. receive messages until we can yield
@@ -180,6 +159,18 @@ impl<U> Endpoint<U> where U: UdpLike {
 
 			// println!("recv loop..");
 			match self.socket.recv(&mut self.buf[self.buf_free_start..]) {
+				Ok(0) => {
+					let _ = self.maybe_ack();
+					return Ok(None)
+				},
+				Err(e) => {
+					let _ = self.maybe_ack();
+					return if e.kind() == ErrorKind::WouldBlock {
+						return Ok(None)
+					} else {
+						Err(ErrorKind::WouldBlock.into())
+					};
+				},
 				Ok(ModOrd::BYTES) => {
 					// got an ACK-ONLY field
 					// println!("GOT ACK ONLY MSG");
@@ -204,7 +195,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 					}
 					let msg = Message {
 						h,
-						payload: (&self.buf[self.buf_free_start..h_starts_at]) as *const [u8],
+						payload: (&mut self.buf[self.buf_free_start..h_starts_at]) as *mut [u8],
 					};
 					self.buf_free_start = h_starts_at; // move the buffer right
 					// println!("buf starts at {} now...", self.buf_free_start);
@@ -213,7 +204,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 					if msg.h.id.special() {
 						// println!("NO SEQ NUM");
 						self.maybe_ack()?;
-						return Ok(unsafe{&*msg.payload})
+						return Ok(Some(unsafe{&mut *msg.payload}))
 					} else if msg.h.set_id < self.largest_set_id_yielded {
 						// println!("TOO OLD");
 					} else if msg.h.wait_until > self.n {
@@ -228,13 +219,9 @@ impl<U> Endpoint<U> where U: UdpLike {
 						self.pre_yield(msg.h.set_id, msg.h.id, msg.h.del);
 						// println!("yeilding in-place...");
 						self.maybe_ack()?;
-						return Ok(unsafe{&*msg.payload})
+						return Ok(Some(unsafe{&mut *msg.payload}))
 					}
 				},
-				Err(e) => {
-					let _ = self.maybe_ack();
-					return Err(e);
-				}
 			}
 		}	
 	}
@@ -317,7 +304,6 @@ impl<U> Endpoint<U> where U: UdpLike {
 
 	fn vacate_buffer(&mut self) {
 		// println!("VACATING INBOX 1 --> INBOX 2...");
-		let mut count = 0;
 		for (id, msg) in self.inbox.drain() {
 			let payload = unsafe{&*msg.payload}.to_vec();
 			// println!("- VACATING MESSAGE WITH ID {:?} ({} bytes)...", id, payload.len());
@@ -326,18 +312,15 @@ impl<U> Endpoint<U> where U: UdpLike {
 				h, payload,
 			};
 			self.inbox2.insert(id, owned_msg);
-			count += 1;
 		}
 		assert!(self.inbox.is_empty());
 		// println!("VACATING COMPLETE. MOVED {} INBOX messages", count);
 
 		// println!("VACATING OUTBOX 1 --> OUTBOX 2...");
-		let mut count = 0;
 		for (id, (instant, bytes)) in self.outbox.drain() {
 			let vec = unsafe{&*bytes}.to_vec();
 			// println!("- VACATING MESSAGE WITH ID {:?} ({} bytes)...", id, vec.len());
 			self.outbox2.insert(id, (instant, vec));
-			count += 1;
 		}
 		assert!(self.inbox.is_empty());
 		// println!("VACATING COMPLETE. MOVED {} OUTBOX messages", count);
@@ -487,12 +470,12 @@ impl<'a, U> Sender for SetSender<'a, U> where U: UdpLike + 'a {
 		let bytes_sent = self.endpoint.out_buf_written + Header::BYTES;
 		self.endpoint.out_buf_written = 0;
 		let new_end = self.endpoint.buf_free_start + bytes_sent;
-		let msg_slice = & self.endpoint.buf[self.endpoint.buf_free_start..new_end];
+		let msg_slice = &mut self.endpoint.buf[self.endpoint.buf_free_start..new_end];
 		self.endpoint.socket.send(msg_slice)?;
 
 		if guarantee == Guarantee::Delivery {
 			// save into outbox and bump the buffer up
-			self.endpoint.outbox.insert(id, (Instant::now(), msg_slice as *const [u8]));
+			self.endpoint.outbox.insert(id, (Instant::now(), msg_slice as *mut [u8]));
 			self.endpoint.buf_free_start = new_end;
 		}
 
@@ -533,7 +516,7 @@ impl<'a, U> io::Write for SetSender<'a, U> where U: UdpLike {
 #[derive(Clone)]
 struct Message {
 	h: Header,
-	payload: *const [u8],
+	payload: *mut [u8],
 }
 impl fmt::Debug for Message {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
