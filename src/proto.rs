@@ -169,8 +169,9 @@ impl Endpoint {
 		if age.as_secs() > 0 {
 			true
 		} else {
-			age.subsec_millis() + seq_difference * 16
-			> 1000 
+			let x = age.subsec_millis() + seq_difference * 8;
+			println!("staleness {}", x);
+			x > 1000 
 		}
 	}
 
@@ -556,24 +557,8 @@ fn zoop() {
 	println!("YAY");
 	let mut e = Endpoint::new_with_config(socket, config);
 
-	// e.send(Guarantee::Delivery, b"thats a lotta damage");
-
-	// e.as_set(|mut s| {
-	// 	s.send(Guarantee::Delivery, b"1a")?;
-	// 	s.send(Guarantee::Order, b"1b")
-	// }).unwrap();
-
-	// e.as_set(|mut s| {
-	// 	s.send(Guarantee::Delivery, b"2a")?;
-	// 	s.send(Guarantee::Order, b"2b")
-	// }).unwrap();
-
 	e.send(Guarantee::Delivery, b"Dank").unwrap();
-	while let Ok(msg) = e.recv() {
-
-	}
-
-
+	while let Ok(msg) = e.recv() {}
 
 	e.send(Guarantee::Delivery, b"Lower...").unwrap();
 	e.send(Guarantee::Delivery, b"...case").unwrap();
@@ -612,11 +597,15 @@ fn zoop() {
 	}
 	println!("got: {:?}", got);
 	e.send(Guarantee::Delivery, b"wahey").unwrap();
-
-	while let Ok(msg) = e.recv() {
-	}
+	while let Ok(msg) = e.recv() {}
 
 	e.resend_lost().unwrap();
 
 	println!("E {:#?}", e);
+}
+
+
+#[test]
+fn chatting() {
+	
 }
