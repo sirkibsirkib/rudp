@@ -12,83 +12,29 @@ use std::iter;
 
 use mod_ord::ModOrd;
 
-use slab::Slab;
-
-#[derive(Debug)]
-struct Inbox {
-	slab: Slab<Message>,
-	by_id: HashMap<ModOrd, usize>,
-	by_until: HashMap<ModOrd, HashSet<usize>>,
-}
-impl Inbox {
-	pub fn new() -> Self {
-		Self {
-			slab: Slab::new(),
-			by_id: HashMap::new(),
-			by_until: HashMap::new(),
-		}
-	}
-	pub fn got_already(&self, id: ModOrd) -> bool {
-		self.by_id.contains_key(&id)
-	}
-	pub fn store(&mut self, msg: Message) {
-		if !self.got_already(msg.h.id) {
-			let key = self.slab.insert(msg);
-			let msg_ref = self.slab.get(key).unwrap();
-			self.by_id.insert(msg_ref.h.id, key);
-			let s = self.by_until.entry(msg_ref.h.wait_until)
-				.or_insert_with(|| HashSet::new());
-			s.insert(key);
-		}
-	}
-
-	pub fn remove(&mut self, id: ModOrd) {
-		if !self.by_id.contains_key(&id) {
-			return;
-		}
-		let key: usize = *self.by_id.get(&id).unwrap();
-		{
-			let msg_ref = self.slab.get(key).unwrap();
-			self.by_id.remove(&msg_ref.h.id);
-			if {
-				let set = self.by_until.get_mut(&msg_ref.h.wait_until).unwrap();
-				set.remove(&key);
-				set.len() == 0
-			} {
-				self.by_until.remove(&msg_ref.h.wait_until);
-			}
-		}
-		self.slab.remove(key);
-	}
-
-	pub fn try_fetch(&mut self, n: ModOrd) -> Option<Message> {
-		for (&until, mut key_set) in self.by_until.iter_mut() {
-			if until <= n {
-				for key in key_set.iter().cloned() {
-					return Some(self.slab.get(key).unwrap().clone()) // TODO
-				}
-			}
-		}
-		None
-	}
-}
-
 #[derive(Debug)]
 struct Endpoint {
-	socket: UdpSocket,
-	channel: Channel,
-	next_id: ModOrd,
-	wait_until: ModOrd,
+	//both in and out
+	socket: BadUdp,
+	// channel: Channel,
 	buf: Vec<u8>,
 	buf_free_start: usize,
 
+	//outgoing
+	next_id: ModOrd,
+	wait_until: ModOrd,
 
+	//incoming
 	n: ModOrd,
 	largest_set_id_yielded: ModOrd,
-	inbox: Inbox,
 	seen_before: HashSet<ModOrd>,
-	to_remove: Option<ModOrd>, // remove from store
+	inbox: HashMap<ModOrd, Message>,
+	inbox2: HashMap<ModOrd, OwnedMessage>, 
+	inbox2_to_remove: Option<ModOrd>,
 }
+
+const MAX_MSG_SIZE: usize = 64;
+const BUF_EXTRA_SPACE: usize = 0;
 
 impl Endpoint {
 	pub fn drop_my_ass(&mut self, count: u32, ord_count: u32) {
@@ -96,19 +42,20 @@ impl Endpoint {
 		self.wait_until = self.next_id.new_minus(ord_count);
 	}
 
-	pub fn new(socket: UdpSocket, channel: Channel) -> Self {
+	pub fn new(socket: BadUdp) -> Self {
 		Endpoint {
 			socket,
-			channel,
-			buf: iter::repeat(0).take(2048).collect(),
+			// channel,
+			buf: iter::repeat(0).take(MAX_MSG_SIZE + BUF_EXTRA_SPACE).collect(),
 			buf_free_start: 0,
 			next_id: ModOrd::ZERO,
 			wait_until: ModOrd::ZERO,
 			n: ModOrd::ZERO,
 			largest_set_id_yielded: ModOrd::ZERO,
-			inbox: Inbox::new(),
+			inbox: HashMap::new(),
+			inbox2: HashMap::new(),
 			seen_before: HashSet::new(),
-			to_remove: None,
+			inbox2_to_remove: None,
 		}
 	}
 
@@ -116,38 +63,98 @@ impl Endpoint {
 		self.get_set().send(guarantee, payload)
 	}
 
-	fn pre_yield(&mut self, h: &Header) {
-		if h.set_id > self.largest_set_id_yielded {
-			self.largest_set_id_yielded = h.set_id;
+	fn pre_yield(&mut self, set_id: ModOrd, id: ModOrd, del: bool) {
+		if set_id > self.largest_set_id_yielded {
+			self.largest_set_id_yielded = set_id;
 			self.seen_before.clear();
 		}
-		self.seen_before.insert(h.id);
-		if self.n < h.set_id {
-			self.n = h.set_id;
+		self.seen_before.insert(id);
+		if self.n < set_id {
+			self.n = set_id;
 			println!("n set to set_id={:?}", self.n);
 		}
-		if h.del {
+		if del {
 			self.n = self.n.new_plus(1);
 			println!("incrementing n because del. now is {:?}", self.n);
 		}
 	}
 
-	pub fn recv(&mut self) -> io::Result<Vec<u8>> {
-		// resolve to_remove
-		if let Some(r) = self.to_remove {
-			self.inbox.remove(r);
+	fn ready_from_inbox(&self) -> Option<ModOrd> {
+		for (&id, msg) in self.inbox.iter() {
+			if msg.h.wait_until <= self.n {
+				return Some(id);
+			}
+		}
+		None
+	}
+
+	fn ready_from_inbox2(&self) -> Option<ModOrd> {
+		for (&id, msg) in self.inbox2.iter() {
+			if msg.h.wait_until <= self.n {
+				return Some(id);
+			}
+		}
+		None
+	}
+
+	fn vacate_inbox1(&mut self) {
+		println!("VACATING INBOX 1 --> INBOX 2...");
+		let mut count = 0;
+		for (id, msg) in self.inbox.drain() {
+			let payload = unsafe{&*msg.payload}.to_vec();
+			println!("- VACATING MESSAGE WITH ID {:?} ({} bytes)...", id, payload.len());
+			let h = msg.h;
+			let owned_msg = OwnedMessage {
+				h, payload,
+			};
+			self.inbox2.insert(id, owned_msg);
+			count += 1;
+		}
+		println!("VACATING COMPLETE. MOVED {} messages", count);
+		self.buf_free_start = 0;
+	}
+
+	pub fn recv(&mut self) -> io::Result<&[u8]> {
+
+		// first try in-line inbox
+		if let Some(id) = self.ready_from_inbox() {
+			let msg = self.inbox.remove(&id).unwrap();
+			if self.inbox.is_empty() {
+				println!("VACATING INTENTIONALLY (trivial)");
+				self.vacate_inbox1();
+			}
+			self.pre_yield(msg.h.set_id, msg.h.id, msg.h.del);
+			println!("yeilding from store 1...");
+			return Ok(unsafe{&*msg.payload});
 		}
 
-		// first try inbox
-		if let Some(msg) = self.inbox.try_fetch(self.n) {
-			self.to_remove = Some(msg.h.id);
-			self.pre_yield(&msg.h);
-			println!("yeilding from store...");
-			return Ok(msg.payload);
+		// remove from inbox2 as possible
+		if let Some(id) = self.inbox2_to_remove {
+			self.inbox2_to_remove = None;
+			self.inbox2.remove(&id);
+		} 
+
+		// next try inbox2 (growing owned storage)
+		if let Some(id) = self.ready_from_inbox2() {
+			let (set_id, id, del) = {
+				let msg = self.inbox2.get(&id).unwrap();
+				(msg.h.set_id, msg.h.id, msg.h.del)
+			};
+			self.pre_yield(set_id, id, del);
+			self.inbox2_to_remove = Some(id); // will remove later
+			println!("yeilding from store 2...");
+			return Ok(&self.inbox2.get(&id).unwrap().payload);
 		}
 
 		// otherwise try recv
 		loop {
+			// move messages from inbox1 to inbox2 to make space for a recv
+			println!("SPACE IS {}", self.buf.len() - self.buf_free_start);
+			if self.buf.len() - self.buf_free_start < MAX_MSG_SIZE {
+				println!("HAVE TO VACATE");
+				self.vacate_inbox1();
+			}
+
 			println!("recv loop..");
 			match self.socket.recv(&mut self.buf[self.buf_free_start..]) {
 				Ok(bytes) => {
@@ -156,7 +163,7 @@ impl Endpoint {
 					let h_starts_at = self.buf_free_start + bytes - Header::BYTES;
 					let msg = Message {
 						h: Header::read_from(& self.buf[h_starts_at..])?,
-						payload: self.buf[self.buf_free_start..h_starts_at].to_vec(),
+						payload: (&self.buf[self.buf_free_start..h_starts_at]) as *const [u8],
 					};
 					self.buf_free_start = h_starts_at; // move the buffer right
 					println!("buf starts at {} now...", self.buf_free_start);
@@ -164,21 +171,21 @@ impl Endpoint {
 					println!("\n::: channel sent {:?}", &msg);
 					if msg.h.id.special() {
 						println!("NO SEQ NUM");
-						return Ok(msg.payload)
+						return Ok(unsafe{&*msg.payload})
 					} else if msg.h.set_id < self.largest_set_id_yielded {
 						println!("TOO OLD");
 					} else if msg.h.wait_until > self.n {
 						println!("NOT YET");
-						if !self.inbox.got_already(msg.h.id) {
+						if !self.inbox.contains_key(&msg.h.id) {
 							println!("STORING");
-							self.inbox.store(msg);
+							self.inbox.insert(msg.h.id, msg);
 						}
 					} else if self.seen_before.contains(&msg.h.id) {
 						println!("seen before!");
 					} else {
-						self.pre_yield(&msg.h);
+						self.pre_yield(msg.h.set_id, msg.h.id, msg.h.del);
 						println!("yeilding in-place...");
-						return Ok(msg.payload)
+						return Ok(unsafe{&*msg.payload})
 					}
 				},
 				Err(e) => {
@@ -315,14 +322,16 @@ impl Header {
 
 #[test]
 fn zoop() {
-	let channel = Channel::new();
-	let socket = UdpSocket::bind("127.0.0.1:8888")
-	.expect("Failed to bind!");
-	socket.set_nonblocking(true).unwrap();
-	socket.connect("127.0.0.1:8888").unwrap();
+	// let channel = Channel::new();
+	// let socket = UdpSocket::bind("127.0.0.1:8888")
+	// .expect("Failed to bind!");
+	// socket.set_nonblocking(true).unwrap();
+	// socket.connect("127.0.0.1:8888").unwrap();
+
+	let socket = BadUdp::new();
 
 	println!("YAY");
-	let mut e = Endpoint::new(socket, channel);
+	let mut e = Endpoint::new(socket);
 	e.send(Guarantee::Delivery, b"thats a lotta damage");
 	e.as_set(|mut s| {
 		s.send(Guarantee::Delivery, b"1a");
@@ -332,45 +341,58 @@ fn zoop() {
 		s.send(Guarantee::Delivery, b"2a");
 		s.send(Guarantee::Order, b"2b");
 	});
+	for letter in ('a' as u8)..=('z' as u8) {
+		e.send(Guarantee::Delivery, &vec![letter]);
+	}
 
 	let mut got = vec![];
 	while let Ok(msg) = e.recv() {
-		println!("\n --> yielded: {:?}", String::from_utf8_lossy(&msg[..]));
-		got.push(msg);
+		let out: String = String::from_utf8_lossy(&msg[..]).to_string();
+		println!("--> yielded: {:?}\n", &out);
+		got.push(out);
 	}
-	println!("got:");
-	for (i, g) in got.iter().enumerate() {
-		println!("  {}:\t{}", i, String::from_utf8_lossy(&g[..]));
-	}
+	println!("got: {:?}", got);
 }
 
 #[derive(Debug, Clone)]
 struct Message {
 	h: Header,
+	payload: *const [u8],
+}
+
+
+#[derive(Debug, Clone)]
+struct OwnedMessage {
+	h: Header,
 	payload: Vec<u8>,
 }
 
 #[derive(Debug)]
-struct Channel {
-	messages: Vec<Message>,
+struct BadUdp {
+	messages: Vec<Vec<u8>>,
 }
-impl Channel {
+
+impl BadUdp {
 	fn new() -> Self {
-		Self {
+		BadUdp {
 			messages: vec![],
 		}
 	}
-	fn send(&mut self, message: Message) {
-		self.messages.push(message.clone());
-		self.messages.push(message);
+
+	fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
+		let m = buf.to_vec();
+		self.messages.push(m.clone());
+		self.messages.push(m);
+		Ok(buf.len())
 	}
-	fn recv(&mut self) -> Option<Message> {
-		if self.messages.len() == 0 {
-			None
+
+	fn recv(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
+		if self.messages.is_empty() {
+			Err(io::ErrorKind::WouldBlock.into())
 		} else {
 			let i = thread_rng().gen_range(0, self.messages.len());
-			let x = self.messages.remove(i);
-			Some(x)
+			let m = self.messages.remove(i);
+			buf.write(&m)
 		}
 	}
 }

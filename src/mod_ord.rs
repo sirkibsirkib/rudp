@@ -17,19 +17,7 @@ impl ModOrd {
     pub const ZERO: Self = ModOrd(1);
     pub const BEFORE_ZERO: Self = ModOrd(0xFFFF_FFFF);
     pub const SPECIAL: Self = ModOrd(0);
-
-	// #[inline(always)]
-	// pub fn wrap_cmp(&self, other: &Self) -> Ordering {
- //    	let (s1, s2) = (self.0, other.0);
- //        if s1 == s2 {
- //        	Ordering::Equal
- //        } else if (s1 > s2 && s1 - s2 <= HALF) 
- //               || (s1 < s2 && s2 - s1  > HALF) {
- //           	Ordering::Greater
- //        } else {
- //        	Ordering::Less
- //        }
- //    }
+    
     pub fn new_plus(self, num: u32) -> Self {
         assert!(!self.special());
     	ModOrd({
