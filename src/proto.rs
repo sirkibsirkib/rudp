@@ -99,6 +99,9 @@ struct Endpoint {
 	//outgoing
 	next_id: ModOrd,
 	wait_until: ModOrd,
+	 // only stores delivery messages
+	outbox: HashMap<ModOrd, *const [u8]>,
+	outbox2: HashMap<ModOrd, Vec<u8>>,
 
 	//incoming
 	buf_min_space: usize,
@@ -112,6 +115,10 @@ struct Endpoint {
 
 impl Endpoint {
 	pub fn drop_my_ass(&mut self, count: u32, ord_count: u32) {
+		if count == 0 {
+			// no need to waste a perfectly good sequence number
+			return;
+		}
 		self.next_id = self.next_id.new_plus(count);
 		println!("ORD CNT {} CNT {}", ord_count, count);
 		if ord_count < count {
@@ -136,6 +143,8 @@ impl Endpoint {
 			seen_before: HashSet::new(),
 			inbox2_to_remove: None,
 			max_yielded: ModOrd::BEFORE_ZERO,
+			outbox: HashMap::new(),
+			outbox2: HashMap::new(),
 		}
 	}
 
