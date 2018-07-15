@@ -12,3 +12,4 @@ authors = ["sirkibsirkib <christopher.esterhuyse@gmail.com>"]
 byteorder = "1.2"
 rand = "0.5.4"
 slab = "0.4"
+indexmap = "1.0.1"

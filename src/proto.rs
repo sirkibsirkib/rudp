@@ -1,19 +1,18 @@
 #![allow(dead_code)] //////////// REMOVE REMOVE DEBUG DEBUG TODO TODO
 
+use std::{
+	collections::{HashMap, HashSet},
+	io, fmt, time, iter, cmp,
+	io::{
+		// Read,
+		Write,
+	},
+	net::UdpSocket,
+};
 
 use rand::{thread_rng, Rng};
-use std::collections::{HashMap, HashSet};
 use byteorder::{ReadBytesExt, WriteBytesExt};
-use std::io;
-use std::fmt;
-use std::net::UdpSocket;
-use std::io::{
-	// Read,
-	Write,
-};
-use std::time;
-use std::iter;
-
+use indexmap::IndexMap;
 use mod_ord::ModOrd;
 
 /*
@@ -39,29 +38,53 @@ impl EndpointConfig {
 		EndpointConfig {
 			max_msg_size: 2048,
 			buffer_grow_space: 1024,
-			// must_resend_func: Box::new(Self::default_too_stale_func),
 		}
 	}
-
-	// fn default_too_stale_func(seq_difference: u32, age: time::Duration) -> bool {
-	// 	if age.as_secs() > 0 {
-	// 		true
-	// 	} else {
-	// 		age.subsec_millis() + seq_difference * 16
-	// 		> 
-	// 		1000 
-	// 	}
-	// }
 }
 
-// impl fmt::Debug for EndpointConfig {
-// 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-// 		write!(f, "Endpoint config {{ max_msg_size:{}, buffer_grow_space:{}, must_resend_func: <some func> }}",
-// 			self.max_msg_size,
-// 			self.buffer_grow_space,
-// 		)
+// struct InboxMap {
+// 	map: IndexMap<ModOrd, HashSet<Message>>,
+// }
+
+// fn some_id(msgs: &HashSet<Message>) -> Option<ModOrd> {
+// 	for msg in msgs {
+// 		return msg.h.id;
 // 	}
-// } 
+// 	None
+// }
+
+// impl InboxMap {
+// 	pub fn add(&mut self, msg: Message) {
+// 		let wait_until = msg.h.wait_until;
+// 		let mut resort = false;
+// 		let e = self.map.entry(&wait_until).or_insert_with(
+// 			|| {resort = true; HashMap::new()}
+// 		);
+// 		map.sort_keys();
+// 	}
+
+// 	pub fn get(&mut self, n: ModOrd) -> Option<&Message> {
+// 		for (wait_until, set) in self.map.iter() {
+// 			if wait_until > n {
+// 				// wont be ready. neither will anything afterward
+// 				break;
+// 			}
+// 			if let Some(id) = some_id(set) {
+
+// 			}
+// 		}
+// 		None
+// 	}
+
+// 	pub fn remove(&mut self, wait_until: ModOrd, id: ModOrd) {
+
+// 	}
+
+// 	pub fn contains(&mut self, header: &Header) -> bool {
+// 		unimplemented!()
+// 	}
+// }
+
 
 type Socket = BadUdp;
 #[derive(Debug)]
@@ -151,6 +174,7 @@ impl Endpoint {
 
 	fn ready_from_inbox(&self) -> Option<ModOrd> {
 		for (&id, msg) in self.inbox.iter() {
+			println!("inbox1:: visiting id {:?}", id);
 			if msg.h.wait_until <= self.n {
 				return Some(id);
 			}
@@ -160,6 +184,7 @@ impl Endpoint {
 
 	fn ready_from_inbox2(&self) -> Option<ModOrd> {
 		for (&id, msg) in self.inbox2.iter() {
+			println!("inbox1:: visiting id2 {:?}", id);
 			if msg.h.wait_until <= self.n {
 				return Some(id);
 			}
@@ -387,39 +412,10 @@ impl Header {
 		})
 	}
 }
-
-#[test]
-fn zoop() {
-
-	let socket = BadUdp::new();
-	let mut config = EndpointConfig::default();
-	config.max_msg_size = 32;
-	config.buffer_grow_space = 32;
-
-	println!("YAY");
-	let mut e = Endpoint::new_with_config(socket, config);
-	e.send(Guarantee::Delivery, b"thats a lotta damage");
-	e.as_set(|mut s| {
-		s.send(Guarantee::Delivery, b"1a");
-		s.send(Guarantee::Order, b"1b");
-	});
-	e.as_set(|mut s| {
-		s.send(Guarantee::Delivery, b"2a");
-		s.send(Guarantee::Order, b"2b");
-	});
-	for letter in ('a' as u8)..=('g' as u8) {
-		e.send(Guarantee::Delivery, &vec![letter]);
-	}
-
-	let mut got = vec![];
-	while let Ok(msg) = e.recv() {
-		let out: String = String::from_utf8_lossy(&msg[..]).to_string();
-		println!("--> yielded: {:?}\n", &out);
-		got.push(out);
-	}
-	println!("got: {:?}", got);
-
-	println!("E {:#?}", e);
+impl cmp::PartialEq for Header {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
 }
 
 #[derive(Clone)]
@@ -435,11 +431,21 @@ impl fmt::Debug for Message {
 		)
 	}
 }
+impl cmp::PartialEq for Message {
+    fn eq(&self, other: &Self) -> bool {
+        self.h == other.h
+    }
+}
 
 #[derive(Debug, Clone)]
 struct OwnedMessage {
 	h: Header,
 	payload: Vec<u8>,
+}
+impl cmp::PartialEq for OwnedMessage {
+    fn eq(&self, other: &Self) -> bool {
+        self.h == other.h
+    }
 }
 
 #[derive(Debug)]
@@ -470,4 +476,40 @@ impl BadUdp {
 			buf.write(&m)
 		}
 	}
+}
+
+//////////////////////// TEST////////////////
+
+#[test]
+fn zoop() {
+
+	let socket = BadUdp::new();
+	let mut config = EndpointConfig::default();
+	config.max_msg_size = 32;
+	config.buffer_grow_space = 32;
+
+	println!("YAY");
+	let mut e = Endpoint::new_with_config(socket, config);
+	e.send(Guarantee::Delivery, b"thats a lotta damage");
+	e.as_set(|mut s| {
+		s.send(Guarantee::Delivery, b"1a")?;
+		s.send(Guarantee::Order, b"1b")
+	}).unwrap();
+	e.as_set(|mut s| {
+		s.send(Guarantee::Delivery, b"2a")?;
+		s.send(Guarantee::Order, b"2b")
+	}).unwrap();
+	for letter in ('a' as u8)..=('g' as u8) {
+		e.send(Guarantee::Delivery, &vec![letter]).unwrap();
+	}
+
+	let mut got = vec![];
+	while let Ok(msg) = e.recv() {
+		let out: String = String::from_utf8_lossy(&msg[..]).to_string();
+		println!("--> yielded: {:?}\n", &out);
+		got.push(out);
+	}
+	println!("got: {:?}", got);
+
+	println!("E {:#?}", e);
 }
