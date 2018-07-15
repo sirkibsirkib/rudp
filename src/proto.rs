@@ -22,7 +22,7 @@ TODO
 - acknowledgements
 */
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct EndpointConfig {
 	pub max_msg_size: usize,
 	pub buffer_grow_space: usize,
@@ -41,16 +41,17 @@ type Socket = BadUdp;
 #[derive(Debug)]
 struct Endpoint {
 	//both in and out
-	config: EndpointConfig,
 	socket: Socket,
 	buf: Vec<u8>,
 	buf_free_start: usize,
+	max_yielded: ModOrd, // for acking
 
 	//outgoing
 	next_id: ModOrd,
 	wait_until: ModOrd,
 
 	//incoming
+	buf_min_space: usize,
 	n: ModOrd,
 	largest_set_id_yielded: ModOrd,
 	seen_before: HashSet<ModOrd>, // contains messages only in THIS set
@@ -67,11 +68,10 @@ impl Endpoint {
 
 	pub fn new_with_config(socket: Socket, config: EndpointConfig) -> Self {
 		Endpoint {
-			config,
+			buf_min_space: config.max_msg_size + Header::BYTES,
 			socket,
-			// channel,
 			buf: iter::repeat(0)
-				.take(config.max_msg_size + config.buffer_grow_space)
+				.take(config.max_msg_size + config.buffer_grow_space + Header::BYTES)
 				.collect(),
 			buf_free_start: 0,
 			next_id: ModOrd::ZERO,
@@ -82,6 +82,7 @@ impl Endpoint {
 			inbox2: HashMap::new(),
 			seen_before: HashSet::new(),
 			inbox2_to_remove: None,
+			max_yielded: ModOrd::BEFORE_ZERO,
 		}
 	}
 
@@ -106,6 +107,9 @@ impl Endpoint {
 		if del {
 			self.n = self.n.new_plus(1);
 			println!("incrementing n because del. now is {:?}", self.n);
+		}
+		if self.max_yielded < id {
+			self.max_yielded = id;
 		}
 	}
 
@@ -176,11 +180,11 @@ impl Endpoint {
 			return Ok(&self.inbox2.get(&id).unwrap().payload);
 		}
 
-		// otherwise try recv
+		// nothing ready from the inbox. receive messages until we can yield
 		loop {
-			// move messages from inbox1 to inbox2 to make space for a recv
 			println!("SPACE IS {}", self.buf.len() - self.buf_free_start);
-			if self.buf.len() - self.buf_free_start < self.config.max_msg_size {
+			if self.buf.len() - self.buf_free_start < self.buf_min_space {
+			// move messages from inbox1 to inbox2 to make space for a recv
 				println!("HAVE TO VACATE");
 				self.vacate_inbox1();
 			}
