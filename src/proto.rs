@@ -3,7 +3,10 @@
 use std::{
 	collections::{HashMap, HashSet},
 	io, fmt, time, iter, cmp,
-	time::Instant,
+	time::{
+		Instant,
+		Duration,
+	},
 	io::{
 		// Read,
 		Write,
@@ -55,6 +58,7 @@ struct Endpoint<U: UdpLike> {
 	buf: Vec<u8>,
 	buf_free_start: usize,
 	max_yielded: ModOrd, // for acking
+	time_last_acked: Instant,
 
 
 	//outgoing
@@ -97,6 +101,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 				*instant = now;
 			}
 		}
+		self.maybe_ack()?;
 		Ok(())
 	}
 
@@ -134,6 +139,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 			outbox2: HashMap::new(),
 			peer_acked: ModOrd::BEFORE_ZERO,
 			window_size: config.window_size,
+			time_last_acked: Instant::now(),
 		}
 	}
 
@@ -166,12 +172,23 @@ impl<U> Endpoint<U> where U: UdpLike {
 		}
 	}
 
+	fn maybe_ack(&mut self) -> io::Result<()> {
+		let now = Instant::now();
+		if self.time_last_acked.elapsed() > Duration::from_millis(300) {
+			let b = self.buf_free_start;
+			let ctrl_msg_bytes = self.largest_set_id_yielded.write_to(&mut self.buf[b..])?;
+			self.socket.send(&self.buf[b..(b+ModOrd::BYTES)])?;
+			self.time_last_acked = now;
+		}
+		Ok(())
+	}
+
 	fn too_stale_func(seq_difference: u32, age: time::Duration) -> bool {
 		if age.as_secs() > 0 {
 			true
 		} else {
 			let x = age.subsec_millis() + seq_difference * 8;
-			println!("staleness {}", x);
+			// println!("staleness {}", x);
 			x > 1000 
 		}
 	}
@@ -237,6 +254,13 @@ impl<U> Endpoint<U> where U: UdpLike {
 		self.buf.len() - self.buf_free_start < self.buf_min_space
 	}
 
+	pub fn digest_incoming_ack(&mut self, ack: ModOrd) {
+		if self.peer_acked < ack {
+			self.peer_acked = ack;
+			println!("peer ack is now {:?}", self.peer_acked);
+		}
+	}
+
 	pub fn recv(&mut self) -> io::Result<&[u8]> {
 		println!("largest_set_id_yielded {:?}", self.largest_set_id_yielded);
 		{
@@ -247,7 +271,6 @@ impl<U> Endpoint<U> where U: UdpLike {
 			);
 			println!("intersection {:?}", &i2);
 			assert!(i2.count() == 0);
-
 		}
 
 		// first try in-line inbox
@@ -260,6 +283,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 			}
 			self.pre_yield(msg.h.set_id, msg.h.id, msg.h.del);
 			println!("yeilding from store 1...");
+			self.maybe_ack()?;
 			return Ok(unsafe{&*msg.payload});
 		}
 
@@ -281,6 +305,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 			self.pre_yield(set_id, id, del);
 			self.inbox2_to_remove = Some(id); // will remove later
 			println!("yeilding from store 2...");
+			self.maybe_ack()?;
 			return Ok(&self.inbox2.get(&id).unwrap().payload);
 		}
 
@@ -296,15 +321,18 @@ impl<U> Endpoint<U> where U: UdpLike {
 
 			println!("recv loop..");
 			match self.socket.recv(&mut self.buf[self.buf_free_start..]) {
+				Ok(ModOrd::BYTES) => {
+					// got an ACK-ONLY field
+					println!("GOT ACK ONLY MSG");
+					let ack = ModOrd::read_from(& self.buf[self.buf_free_start..(self.buf_free_start+ModOrd::BYTES)]).unwrap();
+					self.digest_incoming_ack(ack);
+				},
 				Ok(bytes) => {
 					println!("udp datagram with {} bytes ({} of which are payload)", bytes, bytes-Header::BYTES);
 					assert!(bytes >= Header::BYTES);
 					let h_starts_at = self.buf_free_start + bytes - Header::BYTES;
 					let h = Header::read_from(& self.buf[h_starts_at..])?;
-					if self.peer_acked < h.ack {
-						self.peer_acked = h.ack;
-						println!("peer ack is now {:?}", self.peer_acked);
-					}
+					self.digest_incoming_ack(h.ack);
 
 					if self.largest_set_id_yielded.abs_difference(h.set_id) > self.window_size {
 						println!("OUTSIDE OF WINDOW");
@@ -325,6 +353,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 					println!("\n::: channel sent {:?}", &msg);
 					if msg.h.id.special() {
 						println!("NO SEQ NUM");
+						self.maybe_ack()?;
 						return Ok(unsafe{&*msg.payload})
 					} else if msg.h.set_id < self.largest_set_id_yielded {
 						println!("TOO OLD");
@@ -339,10 +368,12 @@ impl<U> Endpoint<U> where U: UdpLike {
 					} else {
 						self.pre_yield(msg.h.set_id, msg.h.id, msg.h.del);
 						println!("yeilding in-place...");
+						self.maybe_ack()?;
 						return Ok(unsafe{&*msg.payload})
 					}
 				},
 				Err(e) => {
+					let _ = self.maybe_ack();
 					return Err(e);
 				}
 			}
@@ -575,7 +606,7 @@ impl UdpLike for BadUdp {
 	the BadUdp object will connect messages but duplicate and jumble
 	them before sending (no loss).
 */
-#[test]
+// #[test]
 fn bad_udp() {
 
 	let socket = BadUdp::new();
@@ -644,7 +675,7 @@ fn mio_pair() {
 	let poll = Poll::new().unwrap();
 	let mut events = Events::with_capacity(128);
 	let addrs = ["127.0.0.1:8888".parse().unwrap(), "127.0.0.1:8889".parse().unwrap()];
-	let endpoints = {
+	let mut endpoints = {
 		let f = |me_id, peer_id| {
 			let sock = UdpSocket::bind(&addrs[me_id]).unwrap();
 			sock.connect(addrs[peer_id]).unwrap();
@@ -653,4 +684,33 @@ fn mio_pair() {
 		};
 		[f(0, 1), f(1, 0)]
 	};
+
+	endpoints[0].send(Guarantee::Delivery, b"a").unwrap();
+	println!("SEND OVER\n");
+
+	let poll_timeout = Duration::from_millis(1000);
+	loop {
+		println!("POLL LOOP...");
+		poll.poll(&mut events, Some(poll_timeout)).unwrap();
+		for event in events.iter() {
+			println!("event {:?}", event);
+			let endpt = &mut endpoints[event.token().0];
+			let reply: Option<u8> = {
+				if let Ok(msg) = endpt.recv() {
+					println!("msg {:?} ", msg);
+					println!("RECV OVER\n");
+					if msg[0] < 'd' as u8 {
+						Some(msg[0] + 1)
+					} else {None}
+				} else {None}
+				
+			};
+			if let Some(x) = reply {
+				endpt.send(Guarantee::Delivery, &vec![x][..]).unwrap();
+			}
+        }
+        for endpt in endpoints.iter_mut() {
+        	let _ = endpt.resend_lost();
+        }
+	}
 }

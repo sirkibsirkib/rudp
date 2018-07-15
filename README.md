@@ -13,7 +13,8 @@ weaker guarantees incur less overhead. Be as sparing as possible for best perfor
 
 classes:
 * Delivery: each send() will be ordered wrt. other sends. Will arrive exactly once.
-* 
+* Order: each send() will be ordered wrt. other sends. Will arrive at most once.
+* None: send will be neither ordered, nor guaranteed to arrive.
 
 
 ### Message Sets

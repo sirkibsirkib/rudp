@@ -17,6 +17,8 @@ impl ModOrd {
     pub const BEFORE_ZERO: Self = ModOrd(0xFFFF_FFFF);
     pub const SPECIAL: Self = ModOrd(0);
 
+    pub const BYTES: usize = 4;
+
     pub fn new_plus(self, num: u32) -> Self {
         assert!(!self.special());
     	ModOrd({
