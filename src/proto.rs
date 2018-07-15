@@ -151,7 +151,9 @@ impl Endpoint {
 		if set_id > self.largest_set_id_yielded {
 			self.largest_set_id_yielded = set_id;
 			self.seen_before.clear();
+			println!("Clearing `seen before`");
 		}
+		println!("seen before set is {:?}", &self.seen_before);
 		self.seen_before.insert(id);
 		if self.n < set_id {
 			self.n = set_id;
@@ -187,7 +189,7 @@ impl Endpoint {
 
 	fn ready_from_inbox2(&self) -> Option<ModOrd> {
 		for (&id, msg) in self.inbox2.iter() {
-			println!("inbox1:: visiting id2 {:?}", id);
+			println!("inbox2:: visiting id2 {:?}", id);
 			if msg.h.wait_until <= self.n {
 				return Some(id);
 			}
@@ -215,12 +217,31 @@ impl Endpoint {
 		self.buf_free_start = 0;
 	}
 
+	pub fn known_duplicate(&mut self, header: &Header) -> bool {
+		let id = header.id;
+		println!("known?? {} {} {}", self.seen_before.contains(&id), self.inbox.contains_key(&id), self.inbox2.contains_key(&id));
+	  	self.seen_before.contains(&id)
+		|| self.inbox.contains_key(&id)
+		|| self.inbox2.contains_key(&id) 
+	}
+
 	pub fn recv(&mut self) -> io::Result<&[u8]> {
+		println!("largest_set_id_yielded {:?}", self.largest_set_id_yielded);
+		{
+			let intersect: HashSet<ModOrd> = self.inbox.keys().cloned().collect::<HashSet<_>>();
+			let wang = self.inbox2.keys().cloned().collect::<HashSet<_>>();
+			let i2 = intersect.intersection(
+				& wang
+			);
+			println!("intersection {:?}", &i2);
+			assert!(i2.count() == 0);
+
+		}
 
 		// first try in-line inbox
 		if let Some(id) = self.ready_from_inbox() {
-			println!("getting id {:?} from inbox1", id);
 			let msg = self.inbox.remove(&id).unwrap();
+			println!("getting id {:?} from inbox1 with {:?}", id, &msg.h);
 			if self.inbox.is_empty() {
 				println!("VACATING INTENTIONALLY (trivial)");
 				self.vacate_inbox1();
@@ -234,14 +255,15 @@ impl Endpoint {
 		if let Some(id) = self.inbox2_to_remove {
 			println!("getting id {:?} from inbox2", id);
 			println!("removing from inbox2 {:?}", id);
-			self.inbox2_to_remove = None;
 			self.inbox2.remove(&id);
+			self.inbox2_to_remove = None;
 		} 
 
 		// next try inbox2 (growing owned storage)
 		if let Some(id) = self.ready_from_inbox2() {
 			let (set_id, id, del) = {
 				let msg = self.inbox2.get(&id).unwrap();
+				println!("getting id {:?} from inbox2 with {:?}", id, &msg.h);
 				(msg.h.set_id, msg.h.id, msg.h.del)
 			};
 			self.pre_yield(set_id, id, del);
@@ -252,6 +274,7 @@ impl Endpoint {
 
 		// nothing ready from the inbox. receive messages until we can yield
 		loop {
+			println!("largest_set_id_yielded {:?}", self.largest_set_id_yielded);
 			println!("SPACE IS {}", self.buf.len() - self.buf_free_start);
 			if self.buf.len() - self.buf_free_start < self.buf_min_space {
 			// move messages from inbox1 to inbox2 to make space for a recv
@@ -265,8 +288,14 @@ impl Endpoint {
 					println!("udp datagram with {} bytes ({} of which are payload)", bytes, bytes-Header::BYTES);
 					assert!(bytes >= Header::BYTES);
 					let h_starts_at = self.buf_free_start + bytes - Header::BYTES;
+					let h = Header::read_from(& self.buf[h_starts_at..])?;
+
+					if self.known_duplicate(&h) {
+						println!("DROPPING KNOWN DUPLICATE {:?}", h);
+						continue;
+					}
 					let msg = Message {
-						h: Header::read_from(& self.buf[h_starts_at..])?,
+						h,
 						payload: (&self.buf[self.buf_free_start..h_starts_at]) as *const [u8],
 					};
 					self.buf_free_start = h_starts_at; // move the buffer right
@@ -495,7 +524,7 @@ fn zoop() {
 	let socket = BadUdp::new();
 	let mut config = EndpointConfig::default();
 	config.max_msg_size = 64;
-	config.buffer_grow_space = 0;
+	config.buffer_grow_space = 32;
 
 	println!("YAY");
 	let mut e = Endpoint::new_with_config(socket, config);
@@ -512,9 +541,36 @@ fn zoop() {
 	// 	s.send(Guarantee::Order, b"2b")
 	// }).unwrap();
 
-	for letter in ('a' as u8)..=('g' as u8) {
-		e.send(Guarantee::Delivery, &vec![letter]).unwrap();
-	}
+
+
+	e.send(Guarantee::Delivery, b"Lower...").unwrap();
+	e.send(Guarantee::Delivery, b"...case").unwrap();
+
+	e.as_set(|mut s| {
+		for letter in ('a' as u8)..=('e' as u8) {
+			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
+		}
+	});
+
+	e.send(Guarantee::Delivery, b"Numbers").unwrap();
+
+	e.as_set(|mut s| {
+		for letter in ('1' as u8)..=('3' as u8) {
+			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
+		}
+	});
+
+	e.send(Guarantee::Delivery, b"Up...").unwrap();
+	e.send(Guarantee::Delivery, b"...percase").unwrap();
+
+
+	e.as_set(|mut s| {
+		for letter in ('X' as u8)..=('Z' as u8) {
+			s.send(Guarantee::Delivery, &vec![letter]).unwrap();
+		}
+	});
+
+	e.send(Guarantee::Delivery, b"Done").unwrap();
 
 	let mut got = vec![];
 	while let Ok(msg) = e.recv() {
