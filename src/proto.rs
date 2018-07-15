@@ -1,3 +1,5 @@
+#![allow(dead_code)] //////////// REMOVE REMOVE DEBUG DEBUG TODO TODO
+
 
 use rand::{thread_rng, Rng};
 use std::collections::{HashMap, HashSet};
@@ -6,9 +8,10 @@ use std::io;
 use std::fmt;
 use std::net::UdpSocket;
 use std::io::{
-	Read,
+	// Read,
 	Write,
 };
+use std::time;
 use std::iter;
 
 use mod_ord::ModOrd;
@@ -19,23 +22,46 @@ TODO
 - log(n) means of scanning inbox
 - io::Write interface for sending
 - buffered written messages?
-- acknowledgements
+- acknowledgements and explicit RESEND_LOST
+- encrypt message headers. 
+- verify contents of incoming headers
+--- ensure sequence numbers are all reasonable and within window
+--- check a secret NONCE that is set by the user
 */
 
-#[derive(Debug, Clone)]
 struct EndpointConfig {
 	pub max_msg_size: usize,
 	pub buffer_grow_space: usize,
+	// pub must_resend_func: Box<FnMut(u32, time::Duration) -> bool>,
 }
 impl EndpointConfig {
-
 	fn default() -> Self {
 		EndpointConfig {
 			max_msg_size: 2048,
 			buffer_grow_space: 1024,
+			// must_resend_func: Box::new(Self::default_too_stale_func),
 		}
 	}
+
+	// fn default_too_stale_func(seq_difference: u32, age: time::Duration) -> bool {
+	// 	if age.as_secs() > 0 {
+	// 		true
+	// 	} else {
+	// 		age.subsec_millis() + seq_difference * 16
+	// 		> 
+	// 		1000 
+	// 	}
+	// }
 }
+
+// impl fmt::Debug for EndpointConfig {
+// 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+// 		write!(f, "Endpoint config {{ max_msg_size:{}, buffer_grow_space:{}, must_resend_func: <some func> }}",
+// 			self.max_msg_size,
+// 			self.buffer_grow_space,
+// 		)
+// 	}
+// } 
 
 type Socket = BadUdp;
 #[derive(Debug)]
@@ -45,6 +71,7 @@ struct Endpoint {
 	buf: Vec<u8>,
 	buf_free_start: usize,
 	max_yielded: ModOrd, // for acking
+
 
 	//outgoing
 	next_id: ModOrd,
@@ -110,6 +137,15 @@ impl Endpoint {
 		}
 		if self.max_yielded < id {
 			self.max_yielded = id;
+		}
+	}
+
+	fn too_stale_func(seq_difference: u32, age: time::Duration) -> bool {
+		if age.as_secs() > 0 {
+			true
+		} else {
+			age.subsec_millis() + seq_difference * 16
+			> 1000 
 		}
 	}
 
@@ -283,6 +319,7 @@ impl<'a> X<'a> {
 			self.set_id.new_plus(self.count)
 		};
 		let header = Header {
+			ack: self.endpoint.max_yielded,
 			set_id: self.set_id,
 			id,
 			wait_until: self.endpoint.wait_until,
@@ -324,13 +361,15 @@ impl<'a> Drop for X<'a> {
 struct Header {
 	id: ModOrd,
 	set_id: ModOrd,
+	ack: ModOrd,
 	wait_until: ModOrd,
 	del: bool,
 }
 impl Header {
-	const BYTES: usize = 4 + 4 + 4 + 1;
+	const BYTES: usize = 4*4 + 1;
 
 	fn write_to<W: io::Write>(&self, mut w: W) -> io::Result<()> {
+		self.ack.write_to(&mut w)?;
 		self.id.write_to(&mut w)?;
 		self.set_id.write_to(&mut w)?;
 		self.wait_until.write_to(&mut w)?;
@@ -340,6 +379,7 @@ impl Header {
 
 	fn read_from<R: io::Read>(mut r: R) -> io::Result<Self> {
 		Ok(Header {
+			ack: ModOrd::read_from(&mut r)?,
 			id: ModOrd::read_from(&mut r)?,
 			set_id: ModOrd::read_from(&mut r)?,
 			wait_until: ModOrd::read_from(&mut r)?,
@@ -354,7 +394,7 @@ fn zoop() {
 	let socket = BadUdp::new();
 	let mut config = EndpointConfig::default();
 	config.max_msg_size = 32;
-	config.buffer_grow_space = 16;
+	config.buffer_grow_space = 32;
 
 	println!("YAY");
 	let mut e = Endpoint::new_with_config(socket, config);

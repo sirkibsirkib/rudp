@@ -8,7 +8,6 @@ use std::cmp::{
 };
 use std;
 
-const MAX: u32 = std::u32::MAX;
 pub const HALF: u32 = std::u32::MAX/2;
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq)]
@@ -17,7 +16,7 @@ impl ModOrd {
     pub const ZERO: Self = ModOrd(1);
     pub const BEFORE_ZERO: Self = ModOrd(0xFFFF_FFFF);
     pub const SPECIAL: Self = ModOrd(0);
-    
+
     pub fn new_plus(self, num: u32) -> Self {
         assert!(!self.special());
     	ModOrd({
@@ -30,6 +29,15 @@ impl ModOrd {
             }
         })
     }
+
+    pub fn abs_difference(self, other: Self) -> u32 {
+        if self.0 > other.0 {
+            self.0-other.0
+        } else {
+            other.0-self.0
+        }
+    }
+
     pub fn new_minus(self, num: u32) -> Self {
         assert!(!self.special());
         ModOrd({
