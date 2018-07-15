@@ -1,6 +1,16 @@
 
 use rand::{thread_rng, Rng};
 use std::collections::{HashMap, HashSet};
+use byteorder::{ReadBytesExt, WriteBytesExt};
+use std::io;
+use std::net::UdpSocket;
+use std::io::{
+	Read,
+	Write,
+};
+use std::iter;
+
+use mod_ord::ModOrd;
 
 use slab::Slab;
 
@@ -26,8 +36,8 @@ impl Inbox {
 			let key = self.slab.insert(msg);
 			let msg_ref = self.slab.get(key).unwrap();
 			self.by_id.insert(msg_ref.h.id, key);
-			let mut s = self.by_until.entry(msg_ref.h.wait_until)
-			.or_insert_with(|| HashSet::new());
+			let s = self.by_until.entry(msg_ref.h.wait_until)
+				.or_insert_with(|| HashSet::new());
 			s.insert(key);
 		}
 	}
@@ -41,7 +51,7 @@ impl Inbox {
 			let msg_ref = self.slab.get(key).unwrap();
 			self.by_id.remove(&msg_ref.h.id);
 			if {
-				let mut set = self.by_until.get_mut(&msg_ref.h.wait_until).unwrap();
+				let set = self.by_until.get_mut(&msg_ref.h.wait_until).unwrap();
 				set.remove(&key);
 				set.len() == 0
 			} {
@@ -51,7 +61,7 @@ impl Inbox {
 		self.slab.remove(key);
 	}
 
-	pub fn try_fetch(&mut self, n: usize) -> Option<Message> {
+	pub fn try_fetch(&mut self, n: ModOrd) -> Option<Message> {
 		for (&until, mut key_set) in self.by_until.iter_mut() {
 			if until <= n {
 				for key in key_set.iter().cloned() {
@@ -65,40 +75,45 @@ impl Inbox {
 
 #[derive(Debug)]
 struct Endpoint {
+	socket: UdpSocket,
 	channel: Channel,
 	next_id: ModOrd,
-	wait_until: usize,
+	wait_until: ModOrd,
+	buf: Vec<u8>,
+	buf_free_start: usize,
 
 
-	n: usize,
-	largest_set_id_yielded: usize,
+	n: ModOrd,
+	largest_set_id_yielded: ModOrd,
 	inbox: Inbox,
 	seen_before: HashSet<ModOrd>,
 	to_remove: Option<ModOrd>, // remove from store
 }
 
 impl Endpoint {
-	pub fn drop_my_ass(&mut self, count: usize, ord_count: usize) {
-		self.next_id += count;
-		self.wait_until = self.next_id - ord_count;
+	pub fn drop_my_ass(&mut self, count: u32, ord_count: u32) {
+		self.next_id = self.next_id.new_plus(count);
+		self.wait_until = self.next_id.new_minus(ord_count);
 	}
 
-	pub fn new(channel: Channel) -> Self {
+	pub fn new(socket: UdpSocket, channel: Channel) -> Self {
 		Endpoint {
+			socket,
 			channel,
-			next_id: 0,
-			wait_until: 0,
-			n: 0,
-			largest_set_id_yielded: 0,
+			buf: iter::repeat(0).take(2048).collect(),
+			buf_free_start: 0,
+			next_id: ModOrd::ZERO,
+			wait_until: ModOrd::ZERO,
+			n: ModOrd::ZERO,
+			largest_set_id_yielded: ModOrd::ZERO,
 			inbox: Inbox::new(),
 			seen_before: HashSet::new(),
 			to_remove: None,
 		}
 	}
 
-	pub fn send(&mut self, guarantee: Guarantee, payload: &str) {
-		let mut t = self.get_x();
-		t.send(guarantee, payload);
+	pub fn send(&mut self, guarantee: Guarantee, payload: &[u8]) -> io::Result<usize> {
+		self.get_set().send(guarantee, payload)
 	}
 
 	fn pre_yield(&mut self, h: &Header) {
@@ -109,15 +124,15 @@ impl Endpoint {
 		self.seen_before.insert(h.id);
 		if self.n < h.set_id {
 			self.n = h.set_id;
-			println!("n set to set_id={}", self.n);
+			println!("n set to set_id={:?}", self.n);
 		}
 		if h.del {
-			self.n += 1;
-			println!("incrementing n because del. now is {}", self.n);
+			self.n = self.n.new_plus(1);
+			println!("incrementing n because del. now is {:?}", self.n);
 		}
 	}
 
-	pub fn recv(&mut self) -> Option<String> {
+	pub fn recv(&mut self) -> io::Result<Vec<u8>> {
 		// resolve to_remove
 		if let Some(r) = self.to_remove {
 			self.inbox.remove(r);
@@ -128,45 +143,60 @@ impl Endpoint {
 			self.to_remove = Some(msg.h.id);
 			self.pre_yield(&msg.h);
 			println!("yeilding from store...");
-			return Some(msg.payload);
+			return Ok(msg.payload);
 		}
 
 		// otherwise try recv
-		while let Some(msg) = self.channel.recv() {
+		loop {
 			println!("recv loop..");
-			println!("\n::: channel sent {:?}", &msg);
-			if msg.h.id == SPECIAL {
-				println!("NO SEQ NUM");
-				return Some(msg.payload)
-			} else if msg.h.set_id < self.largest_set_id_yielded {
-				println!("TOO OLD");
-			} else if msg.h.wait_until > self.n {
-				println!("NOT YET");
-				if !self.inbox.got_already(msg.h.id) {
-					println!("STORING");
-					self.inbox.store(msg);
+			match self.socket.recv(&mut self.buf[self.buf_free_start..]) {
+				Ok(bytes) => {
+					println!("udp datagram with {} bytes ({} of which are payload)", bytes, bytes-Header::BYTES);
+					assert!(bytes >= Header::BYTES);
+					let h_starts_at = self.buf_free_start + bytes - Header::BYTES;
+					let msg = Message {
+						h: Header::read_from(& self.buf[h_starts_at..])?,
+						payload: self.buf[self.buf_free_start..h_starts_at].to_vec(),
+					};
+					self.buf_free_start = h_starts_at; // move the buffer right
+					println!("buf starts at {} now...", self.buf_free_start);
+
+					println!("\n::: channel sent {:?}", &msg);
+					if msg.h.id.special() {
+						println!("NO SEQ NUM");
+						return Ok(msg.payload)
+					} else if msg.h.set_id < self.largest_set_id_yielded {
+						println!("TOO OLD");
+					} else if msg.h.wait_until > self.n {
+						println!("NOT YET");
+						if !self.inbox.got_already(msg.h.id) {
+							println!("STORING");
+							self.inbox.store(msg);
+						}
+					} else if self.seen_before.contains(&msg.h.id) {
+						println!("seen before!");
+					} else {
+						self.pre_yield(&msg.h);
+						println!("yeilding in-place...");
+						return Ok(msg.payload)
+					}
+				},
+				Err(e) => {
+					return Err(e);
 				}
-			} else if self.seen_before.contains(&msg.h.id) {
-				println!("seen before!");
-			} else {
-				self.pre_yield(&msg.h);
-				println!("yeilding in-place...");
-				return Some(msg.payload)
 			}
-		}
-		println!("SIMPLY NO MSG");
-		None		
+		}	
 	}
 
-	pub fn x_do<F,R>(&mut self, work: F) -> R
+	pub fn as_set<F,R>(&mut self, work: F) -> R
 	where
 		F: Sized + FnOnce(X) -> R,
 		R: Sized,
 	{
-		work(self.get_x())
+		work(self.get_set())
 	}
 
-	pub fn get_x(&mut self) -> X {
+	pub fn get_set(&mut self) -> X {
 		let set_id = self.next_id;
 		X::new(
 			self,
@@ -180,23 +210,18 @@ impl Endpoint {
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 enum Guarantee {
 	None,
-	Ord,
+	Order,
 	Delivery,
 }
 
 //////////////////////////
 
-
-type ModOrd = usize;
-
-const SPECIAL: ModOrd = 0xFF_FF_FF_FF;
-
 #[derive(Debug)]
 struct X<'a> {
 	endpoint: &'a mut Endpoint,
 	set_id: ModOrd,
-	count: usize,
-	ord_count: usize,
+	count: u32,
+	ord_count: u32,
 }
 
 impl<'a> X<'a> {
@@ -210,14 +235,30 @@ impl<'a> X<'a> {
 		}
 	}
 
-	fn send(&mut self, guarantee: Guarantee, payload: &str) {
-		let id = if guarantee == Guarantee::None {SPECIAL} else {self.set_id + self.count};
+	fn send(&mut self, guarantee: Guarantee, payload: &[u8]) -> io::Result<usize> {
+		let id = if guarantee == Guarantee::None {
+			ModOrd::SPECIAL
+		} else {
+			self.set_id.new_plus(self.count)
+		};
 		let header = Header {
 			set_id: self.set_id,
 			id,
 			wait_until: self.endpoint.wait_until,
 			del: guarantee == Guarantee::Delivery,
 		};
+
+		let buf_offset = self.endpoint.buf_free_start;
+		let bytes_sent: usize = {
+			let mut w = &mut self.endpoint.buf[buf_offset..];
+			let len = w.write(payload)?;
+			header.write_to(w)?;
+			len + Header::BYTES
+		};
+		self.endpoint.socket.send(
+			& self.endpoint.buf[buf_offset..(buf_offset+bytes_sent)]
+		)?;
+
 		println!("sending with g:{:?}. header is {:?}", guarantee, &header);
 		if guarantee != Guarantee::None {
 			self.count += 1;
@@ -225,12 +266,13 @@ impl<'a> X<'a> {
 				self.ord_count += 1;
 			}
 		}
-		self.endpoint.channel.send(
-			Message {
-				h: header,
-				payload: payload.to_owned(),
-			}
-		);
+		// self.endpoint.channel.send(
+		// 	Message {
+		// 		h: header,
+		// 		payload: payload.to_owned(),
+		// 	}
+		// );
+		Ok(bytes_sent)
 	}
 }
 
@@ -246,42 +288,66 @@ impl<'a> Drop for X<'a> {
 #[derive(Debug, Clone)]
 struct Header {
 	id: ModOrd,
-	del: bool,
 	set_id: ModOrd,
 	wait_until: ModOrd,
+	del: bool,
 }
+impl Header {
+	const BYTES: usize = 4 + 4 + 4 + 1;
 
+	fn write_to<W: io::Write>(&self, mut w: W) -> io::Result<()> {
+		self.id.write_to(&mut w)?;
+		self.set_id.write_to(&mut w)?;
+		self.wait_until.write_to(&mut w)?;
+		w.write_u8(if self.del {0x01} else {0x00})?;
+		Ok(())
+	}
+
+	fn read_from<R: io::Read>(mut r: R) -> io::Result<Self> {
+		Ok(Header {
+			id: ModOrd::read_from(&mut r)?,
+			set_id: ModOrd::read_from(&mut r)?,
+			wait_until: ModOrd::read_from(&mut r)?,
+			del: r.read_u8()? == 0x01,
+		})
+	}
+}
 
 #[test]
 fn zoop() {
 	let channel = Channel::new();
+	let socket = UdpSocket::bind("127.0.0.1:8888")
+	.expect("Failed to bind!");
+	socket.set_nonblocking(true).unwrap();
+	socket.connect("127.0.0.1:8888").unwrap();
 
 	println!("YAY");
-	let mut e = Endpoint::new(channel);
-	e.send(Guarantee::None, "0a");
-	e.x_do(|mut s| {
-		s.send(Guarantee::Ord, "1a");
-		s.send(Guarantee::Ord, "1b");
+	let mut e = Endpoint::new(socket, channel);
+	e.send(Guarantee::Delivery, b"thats a lotta damage");
+	e.as_set(|mut s| {
+		s.send(Guarantee::Delivery, b"1a");
+		s.send(Guarantee::Order, b"1b");
 	});
-	e.x_do(|mut s| {
-		s.send(Guarantee::Ord, "2a");
-		s.send(Guarantee::Ord, "2b");
+	e.as_set(|mut s| {
+		s.send(Guarantee::Delivery, b"2a");
+		s.send(Guarantee::Order, b"2b");
 	});
 
 	let mut got = vec![];
-	while let Some(msg) = e.recv() {
-		println!("\n --> yielded: {:?}", &msg);
+	while let Ok(msg) = e.recv() {
+		println!("\n --> yielded: {:?}", String::from_utf8_lossy(&msg[..]));
 		got.push(msg);
 	}
-	println!("GOT {:?}", &got);
-
-
+	println!("got:");
+	for (i, g) in got.iter().enumerate() {
+		println!("  {}:\t{}", i, String::from_utf8_lossy(&g[..]));
+	}
 }
 
 #[derive(Debug, Clone)]
 struct Message {
 	h: Header,
-	payload: String,
+	payload: Vec<u8>,
 }
 
 #[derive(Debug)]
