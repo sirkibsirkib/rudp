@@ -1,5 +1,8 @@
 
 use std::io;
+use std::time::Duration;
+use resend_predicates;
+
 pub trait UdpLike: Sized {
 	fn send(&mut self, buf: &[u8]) -> io::Result<usize>;
 	fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize>;
@@ -7,11 +10,16 @@ pub trait UdpLike: Sized {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct EndpointConfig {
 	pub max_msg_size: usize,
 	pub buffer_grow_space: usize,
 	pub window_size: u32,
-	// pub must_resend_func: Box<FnMut(u32, time::Duration) -> bool>,
+	pub new_set_unsent_action: NewSetUnsent,
+
+	#[derivative(Debug="ignore")]
+	pub resend_predicate: Box<FnMut(u32, Duration) -> bool>,
 }
 impl EndpointConfig {
 	pub fn default() -> Self {
@@ -19,8 +27,17 @@ impl EndpointConfig {
 			max_msg_size: 2048,
 			buffer_grow_space: 1024,
 			window_size: 64,
+			new_set_unsent_action: NewSetUnsent::Panic,
+			resend_predicate: Box::new(resend_predicates::medium_combination),
 		}
 	}
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum NewSetUnsent {
+	Panic,
+	Clear,
+	IntoSet,
 }
 
 ////////////////////////////////////////////////////////////////////////////////

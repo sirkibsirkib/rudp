@@ -40,3 +40,14 @@ As messages are yielded to the user or overwritten by new data, pointers are del
 but no payload bytes need to move. Anytime there are no references, the start pointer is reset.
 
 If there isn't a reset for long enough that the 'start' pointer is approaching the end of the buffer, payloads are copied to a _secondary_ more conventional heap-like storage, and the 'start' pointer is reset. As most data is consumed shortly after it is written, most payloads never reach the secondary storage.
+
+## Managing a connection
+A RUDP connection is maintained by an `Endpoint` structure, built on top
+of any Udp-like structure. (We suggest using `mio::net::UdpSocket`). 
+All its functions come in three categories:
+1. outgoing: `send_written`, `io::write`, `send_payload`, ...
+1. incoming: `recv`
+1. control: `maintain`
+
+The Endpoint does not have its own thread of control, nor do its calls spin endlessly.
+The progress of the communication

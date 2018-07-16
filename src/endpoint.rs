@@ -3,7 +3,7 @@
 use helper::*;
 use std::{
 	collections::{HashMap, HashSet},
-	io, fmt, time, iter, cmp,
+	io, fmt, iter, cmp,
 	time::{
 		Instant,
 		Duration,
@@ -14,12 +14,16 @@ use byteorder::{ReadBytesExt, WriteBytesExt};
 use mod_ord::ModOrd;
 
 /*
-
-
+Stateful wrapper around a Udp-like object (facilitating sending of datagrams).
+Allows communication with another Endpoint object.
+The Endpoint does not have its own thread of control. Communication
+is maintained by regular `maintain` calls that perform heartbeats, resend lost
+packets etc.
 */
 #[derive(Debug)]
 pub struct Endpoint<U: UdpLike> {
 	//both in and out
+	config: EndpointConfig,
 	socket: U,
 	buf: Vec<u8>,
 	buf_free_start: usize,
@@ -43,26 +47,32 @@ pub struct Endpoint<U: UdpLike> {
 	inbox: HashMap<ModOrd, Message>,
 	inbox2: HashMap<ModOrd, OwnedMessage>, 
 	inbox2_to_remove: Option<ModOrd>,
-	window_size: u32,
 }
-
 
 impl<U> Endpoint<U> where U: UdpLike {
 ///// PUBLIC
-	pub fn resend_lost(&mut self) -> io::Result<()> {
+
+	/*
+	Discard acknowledged outputs, resend lost outputs and send a heartbeat if
+	necessary.
+	*/
+	pub fn maintain(&mut self) -> io::Result<()> {
 		let a = self.peer_acked;
+
+		// clear out acknowledged messages in outboxes
 		self.outbox.retain(|&id, _| id > a);
 		self.outbox2.retain(|&id, _| id > a);
+
 		let now = Instant::now();
 		for (id, (ref mut instant, ref_bytes)) in self.outbox.iter_mut() {
-			if Self::too_stale_func(id.abs_difference(self.n), instant.elapsed()) {
+			if (self.config.resend_predicate)(id.abs_difference(self.n), instant.elapsed()) {
 				//resend
 				self.socket.send(unsafe{&**ref_bytes})?;
 				*instant = now;
 			}
 		}
 		for (id, (ref mut instant, ref vec)) in self.outbox2.iter_mut() {
-			if Self::too_stale_func(id.abs_difference(self.n), instant.elapsed()) {
+			if (self.config.resend_predicate)(id.abs_difference(self.n), instant.elapsed()) {
 				//resend
 				self.socket.send(&vec[..])?;
 				*instant = now;
@@ -72,37 +82,61 @@ impl<U> Endpoint<U> where U: UdpLike {
 		Ok(())
 	}
 
+	/*
+	Create a new Endpoint around the given Udp-like object, with the given
+	configuration.
+	*/
 	pub fn new_with_config(socket: U, config: EndpointConfig) -> Endpoint<U> {
+		let time_last_acked = Instant::now();
+		let buf_min_space = config.max_msg_size + Header::BYTES;
+		let buflen = config.max_msg_size + config.buffer_grow_space + Header::BYTES;
 		Endpoint {
-			buf_min_space: config.max_msg_size + Header::BYTES,
-			socket,
-			buf: iter::repeat(0)
-				.take(config.max_msg_size + config.buffer_grow_space + Header::BYTES)
-				.collect(),
+			config, socket, buf_min_space, time_last_acked,
+			////////////////////////////////////////////////////////////////////
 			buf_free_start: 0,
+			out_buf_written: 0,
+			buf: iter::repeat(0)
+				.take(buflen)
+				.collect(),
+			////////////////////////////////////////////////////////////////////
 			next_id: ModOrd::ZERO,
 			wait_until: ModOrd::ZERO,
 			n: ModOrd::ZERO,
 			largest_set_id_yielded: ModOrd::ZERO,
+			max_yielded: ModOrd::BEFORE_ZERO,
+			peer_acked: ModOrd::BEFORE_ZERO,
+			////////////////////////////////////////////////////////////////////
 			inbox: HashMap::new(),
 			inbox2: HashMap::new(),
 			seen_before: HashSet::new(),
 			inbox2_to_remove: None,
-			max_yielded: ModOrd::BEFORE_ZERO,
 			outbox: HashMap::new(),
 			outbox2: HashMap::new(),
-			peer_acked: ModOrd::BEFORE_ZERO,
-			window_size: config.window_size,
-			time_last_acked: Instant::now(),
-			out_buf_written: 0,
 		}
 	}
 
+	/*
+	Create a new Endpoint around the given Udp-like object, with the default
+	configuration.
+	*/
 	pub fn new(socket: U) -> Endpoint<U> {
 		Self::new_with_config(socket, EndpointConfig::default())
 	}
 
+	/*
+	Attempt to yield a message from the peer Endpoint that is ready for receipt.
+	May block only if the wrapped Udp-like object may block.
+	recv() calls may not call the inner receive, depending on the contents
+	of the inbox.
+
+	Fatal errors return `Err(_)`
+	Reads that fail because they would block return `Ok(None)`
+	Successful reads return `Ok(Some(x))`, where x is an in-place slice into the internal
+	buffer; thus, you need to drop the slice before interacting with the 
+	Endpoint again. 
+	*/
 	pub fn recv(&mut self) -> io::Result<Option<&mut [u8]>> {
+
 		// println!("largest_set_id_yielded {:?}", self.largest_set_id_yielded);
 		{
 			let intersect: HashSet<ModOrd> = self.inbox.keys().cloned().collect::<HashSet<_>>();
@@ -187,7 +221,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 					let h = Header::read_from(& self.buf[h_starts_at..])?;
 					self.digest_incoming_ack(h.ack);
 
-					if self.largest_set_id_yielded.abs_difference(h.set_id) > self.window_size {
+					if self.largest_set_id_yielded.abs_difference(h.set_id) > self.config.window_size {
 						// println!("OUTSIDE OF WINDOW");
 						continue;
 					}
@@ -229,16 +263,37 @@ impl<U> Endpoint<U> where U: UdpLike {
 		}	
 	}
 
+	/*
+	Convenience function that passes a new `SetSender` into the given closure.
+	See `new_set` for more information.
+	*/
 	pub fn as_set<F,R>(&mut self, work: F) -> R
 	where
 		F: Sized + FnOnce(SetSender<U>) -> R,
 		R: Sized,
 	{
-		work(self.get_set())
+		work(self.new_set())
 	}
 
-	pub fn get_set(&mut self) -> SetSender<U> {
+	/*
+	The `Endpoint` itself implements `Sender`, allowing it to send messages.
+	`new_set` returns a `SetSender` object, which implements the same trait.
+	All messages sent by this setsender object have the added semantics of
+	relaxed ordering _between_ them. 
+	*/
+	pub fn new_set(&mut self) -> SetSender<U> {
 		let set_id = self.next_id;
+		if self.out_buf_written > 0 {
+			match self.config.new_set_unsent_action {
+				NewSetUnsent::Panic => panic!(
+					"Endpoint created new set \
+					with non-empty write buffer! \
+					(Configuration requested a panic)."
+				),
+				NewSetUnsent::Clear => self.out_buf_written = 0,
+				NewSetUnsent::IntoSet => (), // keep the bytes
+			}
+		}
 		SetSender::new(self, set_id)
 	}
 
@@ -273,16 +328,6 @@ impl<U> Endpoint<U> where U: UdpLike {
 			self.time_last_acked = now;
 		}
 		Ok(())
-	}
-
-	fn too_stale_func(seq_difference: u32, age: time::Duration) -> bool {
-		if age.as_secs() > 0 {
-			true
-		} else {
-			let x = age.subsec_millis() + seq_difference * 8;
-			// println!("staleness {}", x);
-			x > 1000 
-		}
 	}
 
 	fn ready_from_inbox(&self) -> Option<ModOrd> {
@@ -367,7 +412,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 
 impl<U> Sender for Endpoint<U> where U: UdpLike {
 	fn send_written(&mut self, guarantee: Guarantee) -> io::Result<usize> {
-		self.get_set().send_written(guarantee)
+		self.new_set().send_written(guarantee)
 	}
 
 	fn clear_written(&mut self) {
@@ -430,6 +475,14 @@ impl cmp::PartialEq for Header {
 
 
 #[derive(Debug)]
+
+/*
+An Endpoint can send payloads of data. However, all messages sent by a single
+`SetSender` object of the endpoint are semantically grouped together into an 
+unordered set. A new set cannot be defined until the current one is dropped.
+
+Note that the concept of _sending_
+*/
 pub struct SetSender<'a, U: UdpLike + 'a>{
 	endpoint: &'a mut Endpoint<U>,
 	set_id: ModOrd,

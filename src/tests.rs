@@ -1,6 +1,11 @@
 use super::*;
 
 use std::{
+	net::{
+		SocketAddr,
+		IpAddr,
+		Ipv4Addr,
+	},
 	io,
 	time::{
 		Duration,
@@ -136,7 +141,7 @@ fn bad_udp() {
 	e.send_payload(b"wahey", Delivery).unwrap();
 	while let Ok(Some(_)) = e.recv() {}
 
-	e.resend_lost().unwrap();
+	e.maintain().unwrap();
 
 	println!("E {:#?}", e);
 }
@@ -148,20 +153,8 @@ fn bad_udp() {
 */
 #[test]
 fn mio_pair() {
-	let poll = Poll::new().unwrap();
+	let (mut endpoints, poll) = registered_udp_endpoint_pair();
 	let mut events = Events::with_capacity(128);
-
-	// setup connected udp endpoints and register them with mio.
-	let addrs = ["127.0.0.1:8888".parse().unwrap(), "127.0.0.1:8889".parse().unwrap()];
-	let mut endpoints = {
-		let f = |me_id, peer_id| {
-			let sock = UdpSocket::bind(&addrs[me_id]).unwrap();
-			sock.connect(addrs[peer_id]).unwrap();
-			poll.register(&sock, Token(me_id), Ready::readable(), PollOpt::edge()).unwrap();
-			Endpoint::new(sock)
-		};
-		[f(0, 1), f(1, 0)]
-	};
 
 	// start us off with the first message
 	endpoints[0].send_payload(b"a", Guarantee::Delivery).unwrap();
@@ -191,9 +184,37 @@ fn mio_pair() {
 			}
         }
         for endpt in endpoints.iter_mut() {
-        	let _ = endpt.resend_lost();
+        	let _ = endpt.maintain();
         }
 	}
+}
+
+// returns two endpoints, registered as Token(0) and Token(1) respectively
+fn registered_udp_endpoint_pair() -> ([Endpoint<UdpSocket>; 2], Poll) {
+	let (sock_a, addr_a) = bind_to_something();
+	let (sock_b, addr_b) = bind_to_something();
+	sock_a.connect(addr_b).unwrap();
+	sock_b.connect(addr_a).unwrap();
+
+	let poll = Poll::new().unwrap();
+	poll.register(
+		&sock_a, Token(0),Ready::readable(), PollOpt::edge()
+	).unwrap();
+	poll.register(
+		&sock_b, Token(1),Ready::readable(), PollOpt::edge()
+	).unwrap();
+	([Endpoint::new(sock_a), Endpoint::new(sock_b)], poll)
+}
+
+fn bind_to_something() -> (UdpSocket, SocketAddr) {
+	let mut addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 100);
+	for port in 100..16000 {
+		addr.set_port(port);
+		if let Ok(sock) = UdpSocket::bind(&addr) {
+			return (sock, addr);
+		}
+	}
+	panic!("no good port!")
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
