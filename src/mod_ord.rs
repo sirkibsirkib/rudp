@@ -1,12 +1,10 @@
 
 use byteorder::{ReadBytesExt, WriteBytesExt, BigEndian};
-use std::io;
-use std::cmp::{
-	Ordering,
-	// Ord,
-	// PartialOrd,
+use std::{
+    self,
+    io,
+    cmp::Ordering,
 };
-use std;
 
 pub const HALF: u32 = std::u32::MAX/2;
 

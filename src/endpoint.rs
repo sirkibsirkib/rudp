@@ -2,23 +2,23 @@
 
 use helper::*;
 use std::{
-	collections::{HashMap, HashSet},
-	io, fmt, iter, cmp,
-	time::{
-		Instant,
+	collections::{
+		HashMap,
+		HashSet,
 	},
+	io, fmt, iter, cmp,
+	time::Instant,
 	io::ErrorKind,
 };
 use byteorder::{ReadBytesExt, WriteBytesExt};
 use mod_ord::ModOrd;
 
-/*
-Stateful wrapper around a Udp-like object (facilitating sending of datagrams).
-Allows communication with another Endpoint object.
-The Endpoint does not have its own thread of control. Communication
-is maintained by regular `maintain` calls that perform heartbeats, resend lost
-packets etc.
-*/
+
+/// Stateful wrapper around a Udp-like object (facilitating sending of datagrams).
+/// Allows communication with another Endpoint object.
+/// The Endpoint does not have its own thread of control. Communication
+/// is maintained by regular `maintain` calls that perform heartbeats, resend lost
+/// packets etc.
 #[derive(Debug)]
 pub struct Endpoint<U: UdpLike> {
 	//both in and out
@@ -51,10 +51,8 @@ pub struct Endpoint<U: UdpLike> {
 impl<U> Endpoint<U> where U: UdpLike {
 ///// PUBLIC
 
-	/*
-	Discard acknowledged outputs, resend lost outputs and send a heartbeat if
-	necessary.
-	*/
+	/// Discard acknowledged outputs, resend lost outputs and send a heartbeat if
+	/// necessary.
 	pub fn maintain(&mut self) -> io::Result<()> {
 		let a = self.peer_acked;
 
@@ -81,10 +79,9 @@ impl<U> Endpoint<U> where U: UdpLike {
 		Ok(())
 	}
 
-	/*
-	Create a new Endpoint around the given Udp-like object, with the given
-	configuration.
-	*/
+	
+	/// Create a new Endpoint around the given Udp-like object, with the given
+	/// configuration.
 	pub fn new_with_config(socket: U, config: EndpointConfig) -> Endpoint<U> {
 		let time_last_acked = Instant::now();
 		let buf_min_space = config.max_msg_size + Header::BYTES;
@@ -114,26 +111,24 @@ impl<U> Endpoint<U> where U: UdpLike {
 		}
 	}
 
-	/*
-	Create a new Endpoint around the given Udp-like object, with the default
-	configuration.
-	*/
+	
+	/// Create a new Endpoint around the given Udp-like object, with the default
+	/// configuration.
 	pub fn new(socket: U) -> Endpoint<U> {
 		Self::new_with_config(socket, EndpointConfig::default())
 	}
 
-	/*
-	Attempt to yield a message from the peer Endpoint that is ready for receipt.
-	May block only if the wrapped Udp-like object may block.
-	recv() calls may not call the inner receive, depending on the contents
-	of the inbox.
-
-	Fatal errors return `Err(_)`
-	Reads that fail because they would block return `Ok(None)`
-	Successful reads return `Ok(Some(x))`, where x is an in-place slice into the internal
-	buffer; thus, you need to drop the slice before interacting with the 
-	Endpoint again. 
-	*/
+	
+	/// Attempt to yield a message from the peer Endpoint that is ready for receipt.
+	/// May block only if the wrapped Udp-like object may block.
+	/// recv() calls may not call the inner receive, depending on the contents
+	/// of the inbox.
+	///
+	/// Fatal errors return `Err(_)`
+	/// Reads that fail because they would block return `Ok(None)`
+	/// Successful reads return `Ok(Some(x))`, where x is an in-place slice into the internal
+	/// buffer; thus, you need to drop the slice before interacting with the 
+	/// Endpoint again. 
 	pub fn recv(&mut self) -> io::Result<Option<&mut [u8]>> {
 
 		// println!("largest_set_id_yielded {:?}", self.largest_set_id_yielded);
@@ -261,10 +256,9 @@ impl<U> Endpoint<U> where U: UdpLike {
 		}	
 	}
 
-	/*
-	Convenience function that passes a new `SetSender` into the given closure.
-	See `new_set` for more information.
-	*/
+	
+	/// Convenience function that passes a new `SetSender` into the given closure.
+	/// See `new_set` for more information.
 	pub fn as_set<F,R>(&mut self, work: F) -> R
 	where
 		F: Sized + FnOnce(SetSender<U>) -> R,
@@ -273,12 +267,11 @@ impl<U> Endpoint<U> where U: UdpLike {
 		work(self.new_set())
 	}
 
-	/*
-	The `Endpoint` itself implements `Sender`, allowing it to send messages.
-	`new_set` returns a `SetSender` object, which implements the same trait.
-	All messages sent by this setsender object have the added semantics of
-	relaxed ordering _between_ them. 
-	*/
+	
+	/// The `Endpoint` itself implements `Sender`, allowing it to send messages.
+	/// `new_set` returns a `SetSender` object, which implements the same trait.
+	/// All messages sent by this setsender object have the added semantics of
+	/// relaxed ordering _between_ them. 
 	pub fn new_set(&mut self) -> SetSender<U> {
 		if self.out_buf_written > 0 {
 			match self.config.new_set_unsent_action {
@@ -497,15 +490,14 @@ impl cmp::PartialEq for Header {
 ////////////////////////////////////////////////////////////////////////////////
 
 
+
+
+/// An Endpoint can send payloads of data. However, all messages sent by a single
+/// `SetSender` object of the endpoint are semantically grouped together into an 
+/// unordered set. A new set cannot be defined until the current one is dropped.
+/// 
+/// Note that the concept of _sending_
 #[derive(Debug)]
-
-/*
-An Endpoint can send payloads of data. However, all messages sent by a single
-`SetSender` object of the endpoint are semantically grouped together into an 
-unordered set. A new set cannot be defined until the current one is dropped.
-
-Note that the concept of _sending_
-*/
 pub struct SetSender<'a, U: UdpLike + 'a>{
 	endpoint: &'a mut Endpoint<U>,
 	set_id: ModOrd,

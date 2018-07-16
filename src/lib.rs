@@ -7,6 +7,8 @@ mod endpoint;
 mod mod_ord;
 mod helper;
 
+/// Provided functions that can be passed as the resend_predicate of
+/// a customized EndpointConfig
 pub mod resend_predicates;
 
 pub use helper::{
