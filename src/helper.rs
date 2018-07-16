@@ -43,6 +43,7 @@ pub struct EndpointConfig {
 
 	#[derivative(Debug="ignore")]
 	pub resend_predicate: Box<FnMut(u32, Duration) -> bool>,
+	pub min_heartbeat_period: Duration,
 }
 impl EndpointConfig {
 
@@ -57,6 +58,7 @@ impl EndpointConfig {
 			window_size: 64,
 			new_set_unsent_action: NewSetUnsent::Panic,
 			resend_predicate: Box::new(resend_predicates::medium_combination),
+			min_heartbeat_period: Duration::from_millis(180),
 		}
 	}
 }

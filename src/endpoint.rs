@@ -6,7 +6,6 @@ use std::{
 	io, fmt, iter, cmp,
 	time::{
 		Instant,
-		Duration,
 	},
 	io::ErrorKind,
 };
@@ -214,9 +213,8 @@ impl<U> Endpoint<U> where U: UdpLike {
 					let ack = ModOrd::read_from(& self.buf[self.buf_free_start..(self.buf_free_start+ModOrd::BYTES)]).unwrap();
 					self.digest_incoming_ack(ack);
 				},
-				Ok(bytes) => {
+				Ok(bytes) if bytes >= Header::BYTES => {
 					// println!("udp datagram with {} bytes ({} of which are payload)", bytes, bytes-Header::BYTES);
-					assert!(bytes >= Header::BYTES);
 					let h_starts_at = self.buf_free_start + bytes - Header::BYTES;
 					let h = Header::read_from(& self.buf[h_starts_at..])?;
 					self.digest_incoming_ack(h.ack);
@@ -226,8 +224,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 						continue;
 					}
 
-					if self.known_duplicate(&h) {
-						// println!("DROPPING KNOWN DUPLICATE {:?}", h);
+					if self.invalid_header(&h) || self.known_duplicate(&h) {
 						continue;
 					}
 					let msg = Message {
@@ -259,6 +256,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 						return Ok(Some(unsafe{&mut *msg.payload}))
 					}
 				},
+				Ok(_) => (), // invalid size datagram. drop.
 			}
 		}	
 	}
@@ -300,6 +298,23 @@ impl<U> Endpoint<U> where U: UdpLike {
 
 ////////////// PRIVATE
 
+	#[inline]
+	fn invalid_header(&mut self, h: &Header) -> bool {
+		if self.largest_set_id_yielded.abs_difference(h.set_id)
+		> self.config.window_size {
+			//outside of window
+			true
+		} else if h.id < h.set_id {
+			// set id cannot be AFTER the id
+			true
+		} else if h.wait_until > h.id {
+			// cannot wait for a message after self
+			true
+		} else {
+			false
+		}
+	}
+
 	#[inline(always)]
 	fn inner_new_set(&mut self) -> SetSender<U> {
 		let set_id = self.next_id;
@@ -329,7 +344,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 
 	fn maybe_ack(&mut self) -> io::Result<()> {
 		let now = Instant::now();
-		if self.time_last_acked.elapsed() > Duration::from_millis(300) {
+		if self.time_last_acked.elapsed() > self.config.min_heartbeat_period {
 			let b = self.buf_free_start;
 			self.largest_set_id_yielded.write_to(&mut self.buf[b..])?;
 			self.socket.send(&self.buf[b..(b+ModOrd::BYTES)])?;
