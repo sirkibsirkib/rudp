@@ -1,6 +1,6 @@
 [package]
 name = "rudp"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["sirkibsirkib <christopher.esterhuyse@gmail.com>"]
 repository = "https://github.com/sirkibsirkib/rudp"
 readme = "README.md"
