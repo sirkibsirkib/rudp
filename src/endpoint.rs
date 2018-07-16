@@ -282,7 +282,6 @@ impl<U> Endpoint<U> where U: UdpLike {
 	relaxed ordering _between_ them. 
 	*/
 	pub fn new_set(&mut self) -> SetSender<U> {
-		let set_id = self.next_id;
 		if self.out_buf_written > 0 {
 			match self.config.new_set_unsent_action {
 				NewSetUnsent::Panic => panic!(
@@ -294,10 +293,19 @@ impl<U> Endpoint<U> where U: UdpLike {
 				NewSetUnsent::IntoSet => (), // keep the bytes
 			}
 		}
+		self.inner_new_set()
+	}
+
+
+
+////////////// PRIVATE
+
+	#[inline(always)]
+	fn inner_new_set(&mut self) -> SetSender<U> {
+		let set_id = self.next_id;
 		SetSender::new(self, set_id)
 	}
 
-////////////// PRIVATE
 	fn pre_yield(&mut self, set_id: ModOrd, id: ModOrd, del: bool) {
 		if set_id > self.largest_set_id_yielded {
 			self.largest_set_id_yielded = set_id;
@@ -412,7 +420,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 
 impl<U> Sender for Endpoint<U> where U: UdpLike {
 	fn send_written(&mut self, guarantee: Guarantee) -> io::Result<usize> {
-		self.new_set().send_written(guarantee)
+		self.inner_new_set().send_written(guarantee)
 	}
 
 	fn clear_written(&mut self) {
