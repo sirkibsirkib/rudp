@@ -131,35 +131,19 @@ impl<U> Endpoint<U> where U: UdpLike {
 	/// Endpoint again. 
 	pub fn recv(&mut self) -> io::Result<Option<&mut [u8]>> {
 
-		// println!("largest_set_id_yielded {:?}", self.largest_set_id_yielded);
-		{
-			let intersect: HashSet<ModOrd> = self.inbox.keys().cloned().collect::<HashSet<_>>();
-			let wang = self.inbox2.keys().cloned().collect::<HashSet<_>>();
-			let i2 = intersect.intersection(
-				& wang
-			);
-			// println!("intersection {:?}", &i2);
-			assert!(i2.count() == 0);
-		}
-
 		// first try in-line inbox
 		if let Some(id) = self.ready_from_inbox() {
 			let msg = self.inbox.remove(&id).unwrap();
-			// println!("getting id {:?} from inbox1 with {:?}", id, &msg.h);
 			if self.inbox.is_empty() && self.outbox.is_empty() {
-				// println!("VACATING INTENTIONALLY (trivial)");
 				self.vacate_buffer();
 			}
 			self.pre_yield(msg.h.set_id, msg.h.id, msg.h.del);
-			// println!("yeilding from store 1...");
 			self.maybe_ack()?;
 			return Ok(Some(unsafe{&mut *msg.payload}));
 		}
 
 		// remove from inbox2 as possible
 		if let Some(id) = self.inbox2_to_remove {
-			// println!("getting id {:?} from inbox2", id);
-			// println!("removing from inbox2 {:?}", id);
 			self.inbox2.remove(&id);
 			self.inbox2_to_remove = None;
 		} 
@@ -168,27 +152,20 @@ impl<U> Endpoint<U> where U: UdpLike {
 		if let Some(id) = self.ready_from_inbox2() {
 			let (set_id, id, del) = {
 				let msg = self.inbox2.get(&id).unwrap();
-				// println!("getting id {:?} from inbox2 with {:?}", id, &msg.h);
 				(msg.h.set_id, msg.h.id, msg.h.del)
 			};
 			self.pre_yield(set_id, id, del);
-			self.inbox2_to_remove = Some(id); // will remove later
-			// println!("yeilding from store 2...");
+			self.inbox2_to_remove = Some(id); // remove message on next call
 			self.maybe_ack()?;
 			return Ok(Some(&mut self.inbox2.get_mut(&id).unwrap().payload));
 		}
 
 		// nothing ready from the inbox. receive messages until we can yield
 		loop {
-			// println!("largest_set_id_yielded {:?}", self.largest_set_id_yielded);
-			// println!("SPACE IS {}", self.buf.len() - self.buf_free_start);
 			if self.buf_cant_take_another() {
-			// move messages from inbox1 to inbox2 to make space for a recv
-				println!("HAVE TO VACATE");
 				self.vacate_buffer();
 			}
 
-			// println!("recv loop..");
 			match self.socket.recv(&mut self.buf[self.buf_free_start..]) {
 				Ok(0) => {
 					let _ = self.maybe_ack();
@@ -203,22 +180,13 @@ impl<U> Endpoint<U> where U: UdpLike {
 					};
 				},
 				Ok(ModOrd::BYTES) => {
-					// got an ACK-ONLY field
-					// println!("GOT ACK ONLY MSG");
 					let ack = ModOrd::read_from(& self.buf[self.buf_free_start..(self.buf_free_start+ModOrd::BYTES)]).unwrap();
 					self.digest_incoming_ack(ack);
 				},
 				Ok(bytes) if bytes >= Header::BYTES => {
-					// println!("udp datagram with {} bytes ({} of which are payload)", bytes, bytes-Header::BYTES);
 					let h_starts_at = self.buf_free_start + bytes - Header::BYTES;
 					let h = Header::read_from(& self.buf[h_starts_at..])?;
 					self.digest_incoming_ack(h.ack);
-
-					if self.largest_set_id_yielded.abs_difference(h.set_id) > self.config.window_size {
-						// println!("OUTSIDE OF WINDOW");
-						continue;
-					}
-
 					if self.invalid_header(&h) || self.known_duplicate(&h) {
 						continue;
 					}
@@ -226,32 +194,52 @@ impl<U> Endpoint<U> where U: UdpLike {
 						h,
 						payload: (&mut self.buf[self.buf_free_start..h_starts_at]) as *mut [u8],
 					};
-					self.buf_free_start = h_starts_at; // move the buffer right
-					// println!("buf starts at {} now...", self.buf_free_start);
 
-					// println!("\n::: channel sent {:?}", &msg);
+					// BIG IF ELSE BRANCH.
 					if msg.h.id.special() {
-						// println!("NO SEQ NUM");
+						/* read a 'None' guarantee message.
+						shift - YES
+						store - NO
+						yield = YES
+						*/
 						self.maybe_ack()?;
 						return Ok(Some(unsafe{&mut *msg.payload}))
 					} else if msg.h.set_id < self.largest_set_id_yielded {
-						// println!("TOO OLD");
+						/* previous-set message. Its OLD data. Must discard to be safe.
+						shift - NO
+						store - NO
+						yield = NO
+						*/
+						continue;
 					} else if msg.h.wait_until > self.n {
-						// println!("NOT YET");
+						/* future message.
+						shift - YES
+						store - YES
+						yield = NO
+						*/
 						if !self.inbox.contains_key(&msg.h.id) {
-							// println!("STORING");
 							self.inbox.insert(msg.h.id, msg);
 						}
+						// shift the buffer right. don't want to obliterate the data
+						self.buf_free_start = h_starts_at; 
 					} else if self.seen_before.contains(&msg.h.id) {
-						// println!("seen before!");
+						/* current-set message already yielded
+						shift - NO
+						store - NO
+						yield = NO
+						*/
 					} else {
+						/* ORDER or DELIVERY message, but we can yield it right away
+						shift - NO
+						store - NO
+						yield = YES
+						*/
 						self.pre_yield(msg.h.set_id, msg.h.id, msg.h.del);
-						// println!("yeilding in-place...");
 						self.maybe_ack()?;
 						return Ok(Some(unsafe{&mut *msg.payload}))
-					}
+					}					
 				},
-				Ok(_) => (), // invalid size datagram. drop.
+				Ok(_) => (), // invalid size datagram. improper header or bogus.
 			}
 		}	
 	}
@@ -318,17 +306,13 @@ impl<U> Endpoint<U> where U: UdpLike {
 		if set_id > self.largest_set_id_yielded {
 			self.largest_set_id_yielded = set_id;
 			self.seen_before.clear();
-			// println!("Clearing `seen before`");
 		}
-		// println!("seen before set is {:?}", &self.seen_before);
 		self.seen_before.insert(id);
 		if self.n < set_id {
 			self.n = set_id;
-			// println!("n set to set_id={:?}", self.n);
 		}
 		if del {
 			self.n = self.n.new_plus(1);
-			// println!("incrementing n because del. now is {:?}", self.n);
 		}
 		if self.max_yielded < id {
 			self.max_yielded = id;
@@ -348,7 +332,6 @@ impl<U> Endpoint<U> where U: UdpLike {
 
 	fn ready_from_inbox(&self) -> Option<ModOrd> {
 		for (&id, msg) in self.inbox.iter() {
-			// println!("inbox1:: visiting id {:?}", id);
 			if msg.h.wait_until <= self.n {
 				return Some(id);
 			}
@@ -358,7 +341,6 @@ impl<U> Endpoint<U> where U: UdpLike {
 
 	fn ready_from_inbox2(&self) -> Option<ModOrd> {
 		for (&id, msg) in self.inbox2.iter() {
-			// println!("inbox2:: visiting id2 {:?}", id);
 			if msg.h.wait_until <= self.n {
 				return Some(id);
 			}
@@ -366,11 +348,14 @@ impl<U> Endpoint<U> where U: UdpLike {
 		None
 	}
 
+	/*
+	Empty the big buffer. Need to make sure that any inbox/outbox data
+	that is still inside is relocated to the secondary storage.
+	This requires copying over.
+	*/
 	fn vacate_buffer(&mut self) {
-		// println!("VACATING INBOX 1 --> INBOX 2...");
 		for (id, msg) in self.inbox.drain() {
 			let payload = unsafe{&*msg.payload}.to_vec();
-			// println!("- VACATING MESSAGE WITH ID {:?} ({} bytes)...", id, payload.len());
 			let h = msg.h;
 			let owned_msg = OwnedMessage {
 				h, payload,
@@ -378,22 +363,18 @@ impl<U> Endpoint<U> where U: UdpLike {
 			self.inbox2.insert(id, owned_msg);
 		}
 		assert!(self.inbox.is_empty());
-		// println!("VACATING COMPLETE. MOVED {} INBOX messages", count);
-
-		// println!("VACATING OUTBOX 1 --> OUTBOX 2...");
 		for (id, (instant, bytes)) in self.outbox.drain() {
 			let vec = unsafe{&*bytes}.to_vec();
-			// println!("- VACATING MESSAGE WITH ID {:?} ({} bytes)...", id, vec.len());
 			self.outbox2.insert(id, (instant, vec));
 		}
 		assert!(self.inbox.is_empty());
-		// println!("VACATING COMPLETE. MOVED {} OUTBOX messages", count);
+
+		// reset buffer position to start.
 		self.buf_free_start = 0;
 	}
 
 	fn known_duplicate(&mut self, header: &Header) -> bool {
 		let id = header.id;
-		// println!("known?? {} {} {}", self.seen_before.contains(&id), self.inbox.contains_key(&id), self.inbox2.contains_key(&id));
 	  	self.seen_before.contains(&id)
 		|| self.inbox.contains_key(&id)
 		|| self.inbox2.contains_key(&id) 
@@ -406,20 +387,6 @@ impl<U> Endpoint<U> where U: UdpLike {
 	fn digest_incoming_ack(&mut self, ack: ModOrd) {
 		if self.peer_acked < ack {
 			self.peer_acked = ack;
-			// println!("peer ack is now {:?}", self.peer_acked);
-		}
-	}
-
-
-	fn drop_my_ass(&mut self, count: u32, ord_count: u32) {
-		if count == 0 {
-			// no need to waste a perfectly good sequence number
-			return;
-		}
-		self.next_id = self.next_id.new_plus(count);
-		// println!("ORD CNT {} CNT {}", ord_count, count);
-		if ord_count < count {
-			self.wait_until = self.next_id.new_minus(ord_count);
 		}
 	}
 }
@@ -490,8 +457,6 @@ impl cmp::PartialEq for Header {
 ////////////////////////////////////////////////////////////////////////////////
 
 
-
-
 /// An Endpoint can send payloads of data. However, all messages sent by a single
 /// `SetSender` object of the endpoint are semantically grouped together into an 
 /// unordered set. A new set cannot be defined until the current one is dropped.
@@ -508,7 +473,6 @@ pub struct SetSender<'a, U: UdpLike + 'a>{
 impl<'a, U> SetSender<'a, U> where U: UdpLike + 'a {
 	fn new(endpoint: &mut Endpoint<U>, set_id: ModOrd) -> SetSender<U> {
 		SetSender {
-
 			endpoint,
 			set_id,
 			count: 0,
@@ -520,7 +484,6 @@ impl<'a, U> SetSender<'a, U> where U: UdpLike + 'a {
 impl<'a, U> Sender for SetSender<'a, U> where U: UdpLike + 'a {
 	fn send_written(&mut self, guarantee: Guarantee) -> io::Result<usize> {
 		if self.endpoint.buf_cant_take_another() {
-			// println!("VACATING BUFFER for SEND");
 			self.endpoint.vacate_buffer();
 		}
 		let id = if guarantee == Guarantee::None {
@@ -550,7 +513,6 @@ impl<'a, U> Sender for SetSender<'a, U> where U: UdpLike + 'a {
 			self.endpoint.buf_free_start = new_end;
 		}
 
-		// println!("sending with g:{:?}. header is {:?}", guarantee, &header);
 		if guarantee != Guarantee::None {
 			self.count += 1;
 			if guarantee != Guarantee::Delivery {
@@ -567,8 +529,17 @@ impl<'a, U> Sender for SetSender<'a, U> where U: UdpLike + 'a {
 
 impl<'a, U> Drop for SetSender<'a, U> where U: UdpLike {
     fn drop(&mut self) {
-        // println!("Dropping!");
-        self.endpoint.drop_my_ass(self.count, self.ord_count)
+		if self.count == 0 {
+			// set was empty. nothing to do here
+			return;
+		}
+		// increment the next_id by the number of IDs that the set contained
+		self.endpoint.next_id = self.endpoint.next_id.new_plus(self.count);
+		if self.ord_count < self.count {
+			// there was at least ONE delivery message. future sets must wait fo
+			// all of them (instead of waiting for whatever the previous set was waiting for)
+			self.endpoint.wait_until = self.endpoint.next_id.new_minus(self.ord_count);
+		}
     }
 }
 
@@ -614,4 +585,3 @@ impl cmp::PartialEq for OwnedMessage {
         self.h == other.h
     }
 }
-

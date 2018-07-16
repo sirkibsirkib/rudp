@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-
 /// resend iff:
 /// age < 1.0 sec
 /// OR age_millis + (id_difference*8) >= 1000

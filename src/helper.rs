@@ -44,13 +44,12 @@ pub struct EndpointConfig {
 }
 impl EndpointConfig {
 
-	
 	/// Return a newly-constructed `EndpointConfig` with fields populated by
 	/// default values.
 	pub fn default() -> Self {
 		EndpointConfig {
 			max_msg_size: 2048,
-			buffer_grow_space: 1024,
+			buffer_grow_space: 2048,
 			window_size: 64,
 			new_set_unsent_action: NewSetUnsent::Panic,
 			resend_predicate: Box::new(resend_predicates::medium_combination),
