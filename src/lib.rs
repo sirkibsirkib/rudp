@@ -6,7 +6,6 @@ extern crate derivative;
 mod endpoint;
 mod mod_ord;
 mod helper;
-mod server;
 
 pub mod resend_predicates;
 

@@ -19,7 +19,6 @@ use mio::net::UdpSocket;
 use rand::{thread_rng, Rng};
 use mio::*;
 
-
 /*
 A structure that simulates the sending and receiving of UDP messages 
 */
