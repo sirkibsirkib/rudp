@@ -1,4 +1,4 @@
-extern crate rand;
+// extern crate rand;
 extern crate byteorder;
 #[macro_use]
 extern crate derivative;
@@ -7,8 +7,8 @@ mod endpoint;
 mod mod_ord;
 mod helper;
 
-/// Provided functions that can be passed as the resend_predicate of
-/// a customized EndpointConfig
+/// Provided some example functions that can be passed as the resend_predicate of
+/// a customized EndpointConfig. Feel free to use your own functions.
 pub mod resend_predicates;
 
 pub use helper::{
@@ -16,6 +16,7 @@ pub use helper::{
 	EndpointConfig,
 	UdpLike,
 	Sender,
+	NewSetUnsent,
 };
 
 pub use endpoint::{
