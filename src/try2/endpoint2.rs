@@ -37,15 +37,23 @@ pub struct Endpoint<U: VeryUdpLike> {
 }
 
 
-
-
 impl<U> Endpoint<U> where U: VeryUdpLike {
 ///// PUBLIC
 
 	/// Discard acknowledged outputs, resend lost outputs and send a heartbeat if
 	/// necessary.
 	pub fn maintain(&mut self) -> io::Result<()> {
-		for s in states.iter_mut() { s.maintain() }
+		let now = Instant::now();
+		for s in states.iter_mut() {
+			s.drop_acknowledged();
+			if s.get_time_last_acked.elapsed() >= self.config.min_heartbeat_period {
+				s.set_time_last_acked(now);
+				let b = self.buf_free_start;
+				self.largest_set_id_yielded.write_to(&mut self.buf[b..])?;
+				self.socket.send(&self.buf[b..(b+ModOrd::BYTES)])?;
+				self.time_last_acked = now;
+			}
+		}
 	}
 
 	
