@@ -39,4 +39,7 @@ extern crate bincode;
 extern crate mio;
 
 #[cfg(test)]
+extern crate rand;
+
+#[cfg(test)]
 mod tests;

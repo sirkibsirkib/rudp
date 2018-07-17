@@ -45,29 +45,7 @@ impl<U> Endpoint<U> where U: VeryUdpLike {
 	/// Discard acknowledged outputs, resend lost outputs and send a heartbeat if
 	/// necessary.
 	pub fn maintain(&mut self) -> io::Result<()> {
-		let a = self.peer_acked;
-
-		// clear out acknowledged messages in outboxes
-		self.outbox.retain(|&id, _| id > a);
-		self.outbox2.retain(|&id, _| id > a);
-
-		let now = Instant::now();
-		for (id, (ref mut instant, ref_bytes)) in self.outbox.iter_mut() {
-			if (self.config.resend_predicate)(id.abs_difference(self.n), instant.elapsed()) {
-				//resend
-				self.socket.send(unsafe{&**ref_bytes})?;
-				*instant = now;
-			}
-		}
-		for (id, (ref mut instant, ref vec)) in self.outbox2.iter_mut() {
-			if (self.config.resend_predicate)(id.abs_difference(self.n), instant.elapsed()) {
-				//resend
-				self.socket.send(&vec[..])?;
-				*instant = now;
-			}
-		}
-		self.maybe_ack()?;
-		Ok(())
+		for s in states.iter_mut() { s.maintain() }
 	}
 
 	
@@ -108,33 +86,11 @@ impl<U> Endpoint<U> where U: VeryUdpLike {
 	/// Endpoint again. 
 	pub fn recv_from(&mut self) -> io::Result<Option<(&SocketAddr, &mut [u8])>> {
 
-		// first try in-line inbox
-		if let Some(id) = self.ready_from_inbox() {
-			let msg = self.inbox.remove(&id).unwrap();
-			if self.inbox.is_empty() && self.outbox.is_empty() {
-				self.vacate_buffer();
+		for (peer_addr, state) in self.states.iter_mut() {
+			//TODO maybe ack here
+			if let Some(msg) = state.pop_inbox_ready() {
+				return Ok(Some((recv_from, msg)))
 			}
-			self.pre_yield(msg.h.set_id, msg.h.id, msg.h.del);
-			self.maybe_ack()?;
-			return Ok(Some(unsafe{&mut *msg.payload}));
-		}
-
-		// remove from inbox2 as possible
-		if let Some(id) = self.inbox2_to_remove {
-			self.inbox2.remove(&id);
-			self.inbox2_to_remove = None;
-		} 
-
-		// next try inbox2 (growing owned storage)
-		if let Some(id) = self.ready_from_inbox2() {
-			let (set_id, id, del) = {
-				let msg = self.inbox2.get(&id).unwrap();
-				(msg.h.set_id, msg.h.id, msg.h.del)
-			};
-			self.pre_yield(set_id, id, del);
-			self.inbox2_to_remove = Some(id); // remove message on next call
-			self.maybe_ack()?;
-			return Ok(Some(&mut self.inbox2.get_mut(&id).unwrap().payload));
 		}
 
 		// nothing ready from the inbox. receive messages until we can yield
@@ -257,18 +213,10 @@ impl<U> Endpoint<U> where U: VeryUdpLike {
 ////////////// PRIVATE
 
 	#[inline]
-	fn invalid_header(&mut self, h: &Header) -> bool {
+	fn header_in_range(&self, h: &Header) -> bool {
 		if self.largest_set_id_yielded.abs_difference(h.set_id)
 		> self.config.window_size {
-			//outside of window
-			true
-		} else if h.id < h.set_id {
-			// set id cannot be AFTER the id
-			true
-		} else if h.wait_until > h.id {
-			// cannot wait for a message after self
-			true
-		} else {
+			// outside of window
 			false
 		}
 	}
@@ -296,57 +244,15 @@ impl<U> Endpoint<U> where U: VeryUdpLike {
 		}
 	}
 
-	fn maybe_ack(&mut self) -> io::Result<()> {
-		let now = Instant::now();
-		if self.time_last_acked.elapsed() > self.config.min_heartbeat_period {
-			let b = self.buf_free_start;
-			self.largest_set_id_yielded.write_to(&mut self.buf[b..])?;
-			self.socket.send(&self.buf[b..(b+ModOrd::BYTES)])?;
-			self.time_last_acked = now;
-		}
-		Ok(())
-	}
-
-	fn ready_from_inbox(&self) -> Option<ModOrd> {
-		for (&id, msg) in self.inbox.iter() {
-			if msg.h.wait_until <= self.n {
-				return Some(id);
-			}
-		}
-		None
-	}
-
-	fn ready_from_inbox2(&self) -> Option<ModOrd> {
-		for (&id, msg) in self.inbox2.iter() {
-			if msg.h.wait_until <= self.n {
-				return Some(id);
-			}
-		}
-		None
-	}
-
 	/*
 	Empty the big buffer. Need to make sure that any inbox/outbox data
 	that is still inside is relocated to the secondary storage.
 	This requires copying over.
 	*/
 	fn vacate_buffer(&mut self) {
-		for (id, msg) in self.inbox.drain() {
-			let payload = unsafe{&*msg.payload}.to_vec();
-			let h = msg.h;
-			let owned_msg = OwnedMessage {
-				h, payload,
-			};
-			self.inbox2.insert(id, owned_msg);
+		for state in self.states.values_mut() {
+			state.vacate_primary()
 		}
-		assert!(self.inbox.is_empty());
-		for (id, (instant, bytes)) in self.outbox.drain() {
-			let vec = unsafe{&*bytes}.to_vec();
-			self.outbox2.insert(id, (instant, vec));
-		}
-		assert!(self.inbox.is_empty());
-
-		// reset buffer position to start.
 		self.buf_free_start = 0;
 	}
 
@@ -404,6 +310,18 @@ struct Header {
 }
 impl Header {
 	const BYTES: usize = 4*4 + 1;
+
+	fn is_valid(&self) -> bool {
+		if h.id < h.set_id {
+			// set id cannot be AFTER the id
+			false
+		} else if h.wait_until > h.id {
+			// cannot wait for a message after self
+			false
+		} else {
+			true
+		}
+	}
 
 	fn write_to<W: io::Write>(&self, mut w: W) -> io::Result<()> {
 		self.ack.write_to(&mut w)?;
@@ -527,38 +445,5 @@ impl<'a, U> io::Write for SetSender<'a, U> where U: VeryUdpLike {
 
     fn flush(&mut self) -> io::Result<()> {
     	Ok(())
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-#[derive(Clone)]
-struct Message {
-	h: Header,
-	payload: *mut [u8],
-}
-impl fmt::Debug for Message {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "Inbox1Msg {:?} payload ~= {:?}",
-			self.h,
-			String::from_utf8_lossy(unsafe{&*self.payload}),
-		)
-	}
-}
-impl cmp::PartialEq for Message {
-    fn eq(&self, other: &Self) -> bool {
-        self.h == other.h
-    }
-}
-
-
-#[derive(Debug, Clone)]
-struct OwnedMessage {
-	h: Header,
-	payload: Vec<u8>,
-}
-impl cmp::PartialEq for OwnedMessage {
-    fn eq(&self, other: &Self) -> bool {
-        self.h == other.h
     }
 }

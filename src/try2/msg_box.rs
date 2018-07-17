@@ -43,6 +43,10 @@ impl MsgBox {
 		outbox2.retain(|&id, _| id > ack_to);
 	}
 
+	pub fn primary_elements(&self) -> usize {
+		self.inbox1.len() + self.outbox1.len()
+	}
+
 	pub fn pop_inbox_ready(&mut self, n: ModOrd) -> Option<(ModOrd, &[u8])> {
 		self.do_remove();
 		if let Some(id) = self.ready_from_inbox1(n) {
