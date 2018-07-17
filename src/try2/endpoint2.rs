@@ -13,42 +13,33 @@ use std::{
 use byteorder::{ReadBytesExt, WriteBytesExt};
 use mod_ord::ModOrd;
 
-
-/// Stateful wrapper around a Udp-like object (facilitating sending of datagrams).
-/// Allows communication with another Endpoint object.
-/// The Endpoint does not have its own thread of control. Communication
-/// is maintained by regular `maintain` calls that perform heartbeats, resend lost
-/// packets etc.
-#[derive(Debug)]
-pub struct Endpoint<U: UdpLike> {
-	//both in and out
-	config: EndpointConfig,
-	socket: U,
-	buf: Vec<u8>,
-	buf_free_start: usize,
-	buf_min_space: usize,
-		max_yielded: ModOrd, // for acking
-		time_last_acked: Instant,
-
-	//outgoing
-		next_id: ModOrd,
-		wait_until: ModOrd,
-	 // only stores delivery messages
-		outbox: HashMap<ModOrd, (Instant, *mut [u8])>,
-		outbox2: HashMap<ModOrd, (Instant, Vec<u8>)>,
-		peer_acked: ModOrd,
-		out_buf_written: usize,
-
-	//incoming
-		n: ModOrd,
-		largest_set_id_yielded: ModOrd,
-		seen_before: HashSet<ModOrd>, // contains messages only in THIS set
-		inbox: HashMap<ModOrd, Message>,
-		inbox2: HashMap<ModOrd, OwnedMessage>, 
-	inbox2_to_remove: Option<ModOrd>,
+trait VeryUdpLike {
+	fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)>;
+	fn send_to(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize>;
 }
 
-impl<U> Endpoint<U> where U: UdpLike {
+
+#[derive(Debug)]
+pub struct Endpoint<U: VeryUdpLike> {
+
+	//fundamentals
+	config: EndpointConfig,
+	socket: U,
+
+	// buffer
+	buf: Vec<u8>,
+	buf_free_start: usize,
+	out_buf_written: usize,
+	buf_min_space: usize,
+
+	// state 
+	states: HashMap<SocketAddr, SessionState>,
+}
+
+
+
+
+impl<U> Endpoint<U> where U: VeryUdpLike {
 ///// PUBLIC
 
 	/// Discard acknowledged outputs, resend lost outputs and send a heartbeat if
@@ -83,31 +74,17 @@ impl<U> Endpoint<U> where U: UdpLike {
 	/// Create a new Endpoint around the given Udp-like object, with the given
 	/// configuration.
 	pub fn new_with_config(socket: U, config: EndpointConfig) -> Endpoint<U> {
-		let time_last_acked = Instant::now();
 		let buf_min_space = config.max_msg_size + Header::BYTES;
 		let buflen = config.max_msg_size + config.buffer_grow_space + Header::BYTES;
 		Endpoint {
-			config, socket, buf_min_space, time_last_acked,
-			////////////////////////////////////////////////////////////////////
+			config, socket, buf_min_space,
 			buf_free_start: 0,
 			out_buf_written: 0,
 			buf: iter::repeat(0)
 				.take(buflen)
 				.collect(),
-			////////////////////////////////////////////////////////////////////
-			next_id: ModOrd::ZERO,
-			wait_until: ModOrd::ZERO,
-			n: ModOrd::ZERO,
-			largest_set_id_yielded: ModOrd::ZERO,
-			max_yielded: ModOrd::BEFORE_ZERO,
-			peer_acked: ModOrd::BEFORE_ZERO,
-			////////////////////////////////////////////////////////////////////
-			inbox: HashMap::new(),
-			inbox2: HashMap::new(),
-			seen_before: HashSet::new(),
 			inbox2_to_remove: None,
-			outbox: HashMap::new(),
-			outbox2: HashMap::new(),
+			states: HashMap::new(),
 		}
 	}
 
@@ -129,7 +106,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 	/// Successful reads return `Ok(Some(x))`, where x is an in-place slice into the internal
 	/// buffer; thus, you need to drop the slice before interacting with the 
 	/// Endpoint again. 
-	pub fn recv(&mut self) -> io::Result<Option<&mut [u8]>> {
+	pub fn recv_from(&mut self) -> io::Result<Option<(&SocketAddr, &mut [u8])>> {
 
 		// first try in-line inbox
 		if let Some(id) = self.ready_from_inbox() {
@@ -393,7 +370,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 
 
 
-impl<U> Sender for Endpoint<U> where U: UdpLike {
+impl<U> Sender for Endpoint<U> where U: VeryUdpLike {
 	fn send_written(&mut self, guarantee: Guarantee) -> io::Result<usize> {
 		self.inner_new_set().send_written(guarantee)
 	}
@@ -403,7 +380,7 @@ impl<U> Sender for Endpoint<U> where U: UdpLike {
 	}
 }
 
-impl<U> io::Write for Endpoint<U> where U: UdpLike {
+impl<U> io::Write for Endpoint<U> where U: VeryUdpLike {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
     	let b = (&mut self.buf[(self.buf_free_start + self.out_buf_written)..]).write(bytes)?;
     	self.out_buf_written += b;
@@ -463,14 +440,14 @@ impl cmp::PartialEq for Header {
 /// 
 /// Note that the concept of _sending_
 #[derive(Debug)]
-pub struct SetSender<'a, U: UdpLike + 'a>{
+pub struct SetSender<'a, U: VeryUdpLike + 'a>{
 	endpoint: &'a mut Endpoint<U>,
 	set_id: ModOrd,
 	count: u32,
 	ord_count: u32,
 }
 
-impl<'a, U> SetSender<'a, U> where U: UdpLike + 'a {
+impl<'a, U> SetSender<'a, U> where U: VeryUdpLike + 'a {
 	fn new(endpoint: &mut Endpoint<U>, set_id: ModOrd) -> SetSender<U> {
 		SetSender {
 			endpoint,
@@ -481,7 +458,7 @@ impl<'a, U> SetSender<'a, U> where U: UdpLike + 'a {
 	}
 }
 
-impl<'a, U> Sender for SetSender<'a, U> where U: UdpLike + 'a {
+impl<'a, U> Sender for SetSender<'a, U> where U: VeryUdpLike + 'a {
 	fn send_written(&mut self, guarantee: Guarantee) -> io::Result<usize> {
 		if self.endpoint.buf_cant_take_another() {
 			self.endpoint.vacate_buffer();
@@ -527,7 +504,7 @@ impl<'a, U> Sender for SetSender<'a, U> where U: UdpLike + 'a {
 	}
 }
 
-impl<'a, U> Drop for SetSender<'a, U> where U: UdpLike {
+impl<'a, U> Drop for SetSender<'a, U> where U: VeryUdpLike {
     fn drop(&mut self) {
 		if self.count == 0 {
 			// set was empty. nothing to do here
@@ -543,7 +520,7 @@ impl<'a, U> Drop for SetSender<'a, U> where U: UdpLike {
     }
 }
 
-impl<'a, U> io::Write for SetSender<'a, U> where U: UdpLike {
+impl<'a, U> io::Write for SetSender<'a, U> where U: VeryUdpLike {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
     	self.endpoint.write(bytes)
     }
