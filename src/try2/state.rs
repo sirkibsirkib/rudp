@@ -1,7 +1,8 @@
 
+use internal::*;
 
 #[derive(Debug)]
-struct SessionState {
+struct State {
 	max_yielded: ModOrd, // for acking
 	time_last_acked: Instant,
 	next_id: ModOrd,
@@ -13,10 +14,10 @@ struct SessionState {
 	msg_box: MsgBox,
 }
 
-impl SessionState {
+impl State {
 	fn new() -> Self {
 		let time_last_acked = Instant::now();
-		SessionState {
+		State {
 			next_id: ModOrd::ZERO,
 			wait_until: ModOrd::ZERO,
 			n: ModOrd::ZERO,
@@ -62,5 +63,17 @@ impl SessionState {
 		// not in current set
 		// not already stored in inbox
 		unimplemented!()
+	}
+
+	pub fn inbox_store(&mut self, msg:(Header, PayloadRef)) {
+		self.msg_box.inbox_store(msg)
+	}
+
+	pub fn outbox_store(&mut self, id: ModOrd, msg:(LastSent, PayloadRef)) {
+		self.msg_box.outbox_store(id, msg)
+	}
+
+	pub fn new_header(&mut self, g: Guarantee) -> Header {
+		
 	}
 }

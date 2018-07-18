@@ -1,12 +1,6 @@
-type Payload = Vec<u8>;
-type PayloadRef = *mut [u8];
-type LastSent = Instant;
 
-struct PayloadRef(*mut [u8]);
+use internal::*;
 
-impl PayloadRef {
-	fn to_owned(self) -> Payload { unsafe{&*msg.1}.to_vec() }
-}
 struct MessageStorage {
 	inbox1: HashMap<ModOrd, (Header, PayloadRef)>,
 	inbox2: HashMap<ModOrd, (Header, Payload)>,
@@ -23,6 +17,7 @@ impl MsgBox {
 			inbox2: HashMap::new(),
 			outbox1: HashMap::new(),
 			outbox2: HashMap::new(),
+			to_remove: None,
 		}
 	},
 
@@ -59,6 +54,19 @@ impl MsgBox {
 		} else {
 			None
 		}
+	}
+
+	pub fn inbox_store(&mut self, msg:(Header, PayloadRef)) {
+		let id = msg.id
+		assert!(!self.inbox1.contains_key(&id));
+		assert!(!self.inbox2.contains_key(&id));
+		self.inbox1.insert(id, msg);
+	}
+
+	pub fn outbox_store(&mut self, id: ModOrd, msg: (LastSent, PayloadRef)) {
+		assert!(!self.outbox1.contains_key(&id));
+		assert!(!self.outbox2.contains_key(&id));
+		self.outbox1.insert(id, msg);
 	}
 
 //////////////////////// PRIVATE /////////////////////
