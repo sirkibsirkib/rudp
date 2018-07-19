@@ -7,6 +7,12 @@ mod endpoint;
 mod mod_ord;
 mod helper;
 
+
+/*
+EXPERIMENTAL MODULE. tab out to get things compiling again
+*/
+mod try2;
+
 /// Provided some example functions that can be passed as the resend_predicate of
 /// a customized EndpointConfig. Feel free to use your own functions.
 pub mod resend_predicates;

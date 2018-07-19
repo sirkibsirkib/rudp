@@ -1,7 +1,9 @@
 
-use internal::*;
+use std::collections::HashMap;
+use try2::internal::*;
+use mod_ord::ModOrd;
 
-struct MessageStorage {
+pub struct MsgBox {
 	inbox1: HashMap<ModOrd, (Header, PayloadRef)>,
 	inbox2: HashMap<ModOrd, (Header, Payload)>,
 	outbox1: HashMap<ModOrd, (LastSent, PayloadRef)>,
@@ -19,7 +21,7 @@ impl MsgBox {
 			outbox2: HashMap::new(),
 			to_remove: None,
 		}
-	},
+	}
 
 	// move *1 -> *2 for * in {inbox, outbox}
 	pub fn vacate_primary(&mut self) {
@@ -34,8 +36,8 @@ impl MsgBox {
 	}
 
 	pub fn drop_acknowledged(&mut self, ack_to: ModOrd) {
-		outbox1.retain(|&id, _| id > ack_to);
-		outbox2.retain(|&id, _| id > ack_to);
+		self.outbox1.retain(|&id, _| id > ack_to);
+		self.outbox2.retain(|&id, _| id > ack_to);
 	}
 
 	pub fn primary_elements(&self) -> usize {
@@ -57,7 +59,7 @@ impl MsgBox {
 	}
 
 	pub fn inbox_store(&mut self, msg:(Header, PayloadRef)) {
-		let id = msg.id
+		let id = msg.id;
 		assert!(!self.inbox1.contains_key(&id));
 		assert!(!self.inbox2.contains_key(&id));
 		self.inbox1.insert(id, msg);

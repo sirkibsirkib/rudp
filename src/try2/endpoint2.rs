@@ -1,8 +1,13 @@
 #![allow(dead_code)] //////////// REMOVE REMOVE DEBUG DEBUG TODO TODO
 
-use sliding_buffer::SlidingBuffer;
-use internal::*;
-use traits::*;
+use try2::sliding_buffer::SlidingBuffer;
+use try2::internal::*;
+use try2::traits::*;
+use try2::state::*;
+use try2::set_sender::SetSender;
+use try2::msg_box::*;
+use helper::Guarantee;
+use std::net::SocketAddr;
 use std::{
 	collections::{
 		HashMap,
@@ -13,6 +18,7 @@ use std::{
 	io::ErrorKind,
 };
 use byteorder::{ReadBytesExt, WriteBytesExt};
+use helper::{EndpointConfig, NewSetUnsent};
 use mod_ord::ModOrd;
 
 #[derive(Debug)]
@@ -38,13 +44,13 @@ impl<U> Endpoint<U> where U: UdpLike {
 	/// necessary.
 	pub fn maintain(&mut self) -> io::Result<()> {
 		let now = Instant::now();
-		for s in states.iter_mut() {
+		for s in self.states.values_mut() {
 			s.drop_acknowledged();
-			if s.get_time_last_acked.elapsed() >= self.config.min_heartbeat_period {
+			if s.get_time_last_acked().elapsed() >= self.config.min_heartbeat_period {
 				s.set_time_last_acked(now);
-				let b = self.buf_free_start;
-				self.largest_set_id_yielded.write_to(&mut self.buf[b..])?;
-				self.socket.send(&self.buf[b..(b+ModOrd::BYTES)])?;
+				s.largest_set_id_yielded.write_to(&mut self.sliding_buffer);
+				self.socket.send_to(self.sliding_buffer.get_payload(), s.get_peer_addr())?;
+				self.sliding_buffer.reset_payload();
 				self.time_last_acked = now;
 			}
 		}
@@ -98,7 +104,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 				self.vacate_buffer();
 			}
 
-			match self.socket.recv(&mut self.sliding_buffer.get_writable_slice() {
+			match self.socket.recv(self.sliding_buffer.get_writable_slice()) {
 				Ok((_, 0)) => {
 					return Ok(None)
 				},
@@ -110,48 +116,44 @@ impl<U> Endpoint<U> where U: UdpLike {
 					};
 				},
 				Ok((peer_addr, ModOrd::BYTES)) => {
-					let ack = ModOrd::read_from(& self.buf[self.buf_free_start..(self.buf_free_start+ModOrd::BYTES)]).unwrap();
+					let payload = self.sliding_buffer.get_payload_of_len(ModOrd::BYTES);
+					let ack = ModOrd::read_from(payload).unwrap();
 					self.digest_incoming_ack(ack);
 				},
 				Ok((peer_addr, bytes)) if bytes >= Header::BYTES => {
 
 					// TODO check if you accept the fresh connection
 					let mut state = self.state_for(peer_addr);
-					let h_starts_at = self.buf_free_start + bytes - Header::BYTES;
-					let h = Header::read_from(& self.buf[h_starts_at..])?;
+					let tail_start_at = bytes - Header::BYTES;
+					let (payload, tail_bytes) = self.sliding_buffer.get_payload_of_len(bytes).split_at_mut(tail_start_at);
+					let h = Header::read_from(payload)?;
 					self.digest_incoming_ack(h.ack);
-					if self.invalid_header(&h) || self.known_duplicate(&h) {
+					if !h.is_valid() || self.known_duplicate(&h) {
 						continue;
 					}
-					let msg = Message {
-						h,
-						payload: (&mut self.buf[self.buf_free_start..h_starts_at]) as *mut [u8],
-					};
+					let msg = (h, PayloadRef::from_ref(payload));
 
 					// BIG IF ELSE BRANCH.
-					if msg.h.id.special() {
+					if msg.0.id.special() {
 						/* read a 'None' guarantee message.
 						store - NO
 						yield - YES
 						*/
-						return Ok(Some(unsafe{&mut *msg.payload}))
-					} else if msg.h.set_id < self.largest_set_id_yielded {
+						return Ok(Some(msg.1.expose()))
+					} else if msg.0.set_id < self.largest_set_id_yielded {
 						/* previous-set message. Its OLD data. Must discard to be safe.
 						store - NO
 						yield - NO
 						*/
-						continue;
-					} else if msg.h.wait_until > self.n {
+					} else if msg.0.wait_until > self.n {
 						/* future message.
 						store - YES
 						yield - NO
 						*/
-						if !self.inbox.contains_key(&msg.h.id) {
-							self.inbox.insert(msg.h.id, msg);
-						}
+						state.inbox_store(msg);
 						// shift the buffer right. don't want to obliterate the data
-						self.buf_free_start = h_starts_at; 
-					} else if self.seen_before.contains(&msg.h.id) {
+						self.sliding_buffer.shift_right_by(bytes);
+					} else if self.seen_before.contains(&msg.0.id) {
 						/* current-set message already yielded
 						store - NO
 						yield - NO
@@ -161,13 +163,13 @@ impl<U> Endpoint<U> where U: UdpLike {
 						store - NO
 						yield - YES
 						*/
-						self.pre_yield(msg.h.set_id, msg.h.id, msg.h.del);
-						return Ok(Some(unsafe{&mut *msg.payload}))
+						state.pre_yield(&msg.0);
+						return Ok(Some(msg.1.expose()))
 					}					
 				},
 				Ok((_,_)) => (), // invalid size datagram. improper header or bogus.
 			}
-		}	
+		}
 	}
 
 	
@@ -175,7 +177,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 	/// See `new_set` for more information.
 	pub fn as_set<F,R>(&mut self, addr: &SocketAddr, work: F) -> R
 	where
-		F: Sized + FnOnce(SetSender<U>) -> R,
+		F: Sized + FnOnce(SetSender) -> R,
 		R: Sized,
 	{
 		work(self.new_set(addr))
@@ -186,7 +188,7 @@ impl<U> Endpoint<U> where U: UdpLike {
 	/// `new_set` returns a `SetSender` object, which implements the same trait.
 	/// All messages sent by this setsender object have the added semantics of
 	/// relaxed ordering _between_ them. 
-	pub fn new_set(&mut self, &SocketAddr) -> SetSender<U> {
+	pub fn new_set(&mut self, addr: &SocketAddr) -> SetSender {
 		if self.out_buf_written > 0 {
 			match self.config.new_set_unsent_action {
 				NewSetUnsent::Panic => panic!(
@@ -215,27 +217,10 @@ impl<U> Endpoint<U> where U: UdpLike {
 	}
 
 	#[inline(always)]
-	fn inner_new_set(&mut self, addr: &SocketAddr) -> SetSender<U> {
+	fn inner_new_set(&mut self, addr: &SocketAddr) -> SetSender {
 		let state = self.state_for(addr);
 		let set_id = self.next_id;
 		SetSender::new(self, set_id)
-	}
-
-	fn pre_yield(&mut self, set_id: ModOrd, id: ModOrd, del: bool) {
-		if set_id > self.largest_set_id_yielded {
-			self.largest_set_id_yielded = set_id;
-			self.seen_before.clear();
-		}
-		self.seen_before.insert(id);
-		if self.n < set_id {
-			self.n = set_id;
-		}
-		if del {
-			self.n = self.n.new_plus(1);
-		}
-		if self.max_yielded < id {
-			self.max_yielded = id;
-		}
 	}
 
 	/*
@@ -271,8 +256,14 @@ impl<U> Endpoint<U> where U: UdpLike {
 
 
 impl<U> ExplicitDestSend for Endpoint<U> where U: UdpLike {
-	fn send_written(&mut self, guarantee: Guarantee, dest: &SocketAddr) -> io::Result<usize> {
-		self.inner_new_set().send_written(guarantee, dest)
+	fn send_written_to(&mut self, guarantee: Guarantee, dest: &SocketAddr) -> io::Result<usize> {
+		self.inner_new_set(dest).send_written(guarantee)
+	}
+
+	fn write_send_to(&mut self, g: Guarantee, to_write: &[u8], dest: &SocketAddr) -> io::Result<()> {
+		let mut x = self.inner_new_set(dest);
+		x.write_all(to_write)?;
+		x.send_written(g)
 	}
 
 	fn clear_written(&mut self) {
@@ -292,8 +283,8 @@ impl<U> io::Write for Endpoint<U> where U: UdpLike {
     }
 }
 
-fn state_for(states: &mut HashMap<SocketAddr, State>) -> &mut State {
-	states.entry().or_insert_with(
+fn state_for<'a>(states: &'a mut HashMap<SocketAddr, State>, peer_addr: &SocketAddr) -> &'a mut State {
+	states.entry(&peer_addr).or_insert_with(
 		|| {
 			println!("Making new session-state for {:?}", &peer_addr);
 			println!("New state consumes {} bytes", mem::size_of::<State>());

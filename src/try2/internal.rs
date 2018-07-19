@@ -1,29 +1,44 @@
-type Payload = Vec<u8>;
-type PayloadRef = *mut [u8];
-type LastSent = Instant;
 
-struct PayloadRef(*mut [u8]);
+use mod_ord::ModOrd;
+use std::{
+	cmp,
+	io,
+	time::Instant,
+
+};
+
+pub type Payload = Vec<u8>;
+pub type LastSent = Instant;
+pub struct PayloadRef(*mut [u8]);
 impl PayloadRef {
-	fn to_owned(self) -> Payload { unsafe{&*msg.1}.to_vec() }
+	pub fn to_owned(self) -> Payload {
+		self.expose().to_vec()
+	}
+	pub fn expose(self) -> &'static mut [u8] {
+		unsafe{&mut *self.1}
+	}
+	pub fn from_ref(r: &mut [u8]) -> Self {
+		PayloadRef(r as *mut [u8])
+	}
 }
 
 
 #[derive(Debug, Clone)]
-struct Header {
-	id: ModOrd,
-	set_id: ModOrd,
-	ack: ModOrd,
-	wait_until: ModOrd,
-	del: bool,
+pub struct Header {
+	pub id: ModOrd,
+	pub set_id: ModOrd,
+	pub ack: ModOrd,
+	pub wait_until: ModOrd,
+	pub del: bool,
 }
 impl Header {
 	const BYTES: usize = 4*4 + 1;
 
 	fn is_valid(&self) -> bool {
-		if h.id < h.set_id {
+		if self.id < self.set_id {
 			// set id cannot be AFTER the id
 			false
-		} else if h.wait_until > h.id {
+		} else if self.wait_until > self.id {
 			// cannot wait for a message after self
 			false
 		} else {

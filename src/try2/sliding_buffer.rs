@@ -1,3 +1,5 @@
+use std::io;
+use std::iter;
 
 /*
                       payload start           
@@ -12,8 +14,8 @@
 
 */
 
-
-struct SlidingBuffer {
+#[derive(Debug)]
+pub struct SlidingBuffer {
 	buf: Vec<u8>,
 	payload_start: usize, // INCL
 	payload_end: usize, // NOT INCL
@@ -27,7 +29,7 @@ impl io::Write for SlidingBuffer {
     }
 
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
-
+}
 
 impl SlidingBuffer {
     pub fn shift_right(&mut self) -> usize {
@@ -36,13 +38,18 @@ impl SlidingBuffer {
     	diff
     }
 
+    pub fn shift_right_by(&mut self, value: usize) {
+    	self.payload_start += value;
+    	self.payload_end = self.payload_start;
+    }
+
     pub fn reset_start(&mut self) {
     	self.payload_start = 0;
     	self.payload_end = 0;
     }
 
     pub fn space_left(&self) -> usize {
-    	buf.len() - self.payload_end
+    	self.buf.len() - self.payload_end
     }
 
     pub fn new(capacity: usize) -> Self {
@@ -58,8 +65,8 @@ impl SlidingBuffer {
     }
 
     pub fn reset_payload(&mut self) -> usize {
-    	let diff = payload_size();
-    	self.payload_end = payload_start;
+    	let diff = self.payload_size();
+    	self.payload_end = self.payload_start;
     	diff
     }
 

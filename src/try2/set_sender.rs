@@ -1,3 +1,19 @@
+use std::{
+	io,
+	time::Instant,
+};
+use helper::Guarantee;
+use mod_ord::ModOrd;
+use try2::{
+	traits::*,
+	state::*,
+	internal::*,
+};
+use std::{
+	mem,
+	net::SocketAddr,
+};
+
 
 /// An Endpoint can send payloads of data. However, all messages sent by a single
 /// `SetSender` object of the endpoint are semantically grouped together into an 
@@ -5,17 +21,19 @@
 /// 
 /// Note that the concept of _sending_
 #[derive(Debug)]
-pub struct SetSender<'a, U: UdpLike + 'a>{
-	endpoint: &'a mut Endpoint<U>,
+pub struct SetSender<'a>{
+	state: &'a mut State,
 	set_id: ModOrd,
 	count: u32,
 	ord_count: u32,
+	peer_addr: &'a SocketAddr,
 }
 
-impl<'a, U> SetSender<'a, U> where U: UdpLike + 'a {
-	fn new(endpoint: &mut Endpoint<U>, set_id: ModOrd) -> SetSender<U> {
+impl<'a> SetSender<'a> {
+	fn new(state: &'a mut State, set_id: ModOrd, peer_addr: &SocketAddr) -> SetSender<'a> {
 		SetSender {
-			endpoint,
+			peer_addr,
+			state,
 			set_id,
 			count: 0,
 			ord_count: 0,
@@ -23,18 +41,13 @@ impl<'a, U> SetSender<'a, U> where U: UdpLike + 'a {
 	}
 }
 
-impl<'a, U> Sender for SetSender<'a, U> where U: UdpLike + 'a {
-	fn send_written(&mut self, guarantee: Guarantee, dest: &SocketAddr) -> io::Result<usize> {
+impl<'a> ImplicitDestSend for SetSender<'a> {
+	fn write_send(&mut self, g: Guarantee, to_write: &[u8]) -> io::Result<()> {
+		self.write_all(to_write)?;
+		self.send_written(g)
+	}
 
-		// TODO check if you accept the fresh connection
-		let mut state = self.states.entry().or_insert_with(
-			|| {
-				println!("Making new session-state for {:?}", &peer_addr);
-				println!("New state consumes {} bytes", mem::size_of::<State>());
-				State::new()
-			}
-		);
-
+	fn send_written(&mut self, guarantee: Guarantee) -> io::Result<usize> {
 		if self.endpoint.buf_cant_take_another() {
 			self.endpoint.vacate_buffer();
 		}
@@ -80,7 +93,7 @@ impl<'a, U> Sender for SetSender<'a, U> where U: UdpLike + 'a {
 	}
 }
 
-impl<'a, U> Drop for SetSender<'a, U> where U: UdpLike {
+impl<'a> Drop for SetSender<'a> {
     fn drop(&mut self) {
 		if self.count == 0 {
 			// set was empty. nothing to do here
@@ -96,7 +109,7 @@ impl<'a, U> Drop for SetSender<'a, U> where U: UdpLike {
     }
 }
 
-impl<'a, U> io::Write for SetSender<'a, U> where U: UdpLike {
+impl<'a> io::Write for SetSender<'a> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
     	self.endpoint.write(bytes)
     }
